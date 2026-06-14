@@ -3,6 +3,85 @@
 `QAWG` is a host-side experiment compiler for the Tektronix AWG5208 and
 ATS9371 stack in this repository.
 
+The package owns the complete hardware stack:
+
+```text
+QAWG/
+    awg5200/       Waveform, marker, sequence, and AWG5208 driver
+    alazar/        ATS9371 acquisition and signal processing
+    awg_alazar.py  AWG/Alazar execution coordinator
+    compiler.py    Experiment rules and compiled sequence plan
+    examples.py    Spectroscopy, Power Rabi, T1, and single-shot programs
+```
+
+Common imports:
+
+```python
+from QAWG import AWGAlazar, ExperimentProgram
+from QAWG.awg5200 import gaussian_square_ns, waveform
+from QAWG.alazar import AlazarProcessor
+```
+
+## Hardware vs experiment configuration
+
+Connection-time settings describe fixed hardware capabilities:
+
+```python
+experiment = AWGAlazar.connect(
+    "TCPIP0::192.168.10.171::inst0::INSTR",
+    awg_sample_rate_hz=2.5e9,
+    alazar_sample_rate_hz=1e9,
+    acquire_window_s=1.5 * us,
+    trigger_slope="rising",
+    trigger_level=140,
+)
+```
+
+`acquire_window_s` is the maximum raw ATS record requested for every shot.
+It is independent of IQ integration.
+
+`trigger_slope` and `trigger_level` are fixed ATS external-trigger electrical
+settings. `trigger_level` is the Alazar SDK threshold code from 0 to 255, not
+a voltage value.
+
+Readout processing settings belong to each experiment declaration:
+
+```python
+self.declare_readout(
+    "ro",
+    adc_channel=cfg["adc_channel"],
+    length=cfg["ro_len"],
+    demod_freq=cfg["f_res"],
+    waveform_ch=cfg["res_ch"],
+    integrate_time=cfg["integrate_time"],
+)
+```
+
+ATS trigger configuration belongs in the program body:
+
+```python
+self.trigger(
+    "ro",
+    trigger_delay=cfg["trigger_delay"],
+)
+```
+
+The compiler uses `waveform_ch` as the marker reference. It finds that
+channel's active waveform interval and creates a same-length marker waveform
+on `marker_channel`, using the original AWG marker alignment logic.
+For a marker fixed at the beginning of every sequence step, use
+`marker_length=40 * ns` instead of `waveform_ch`.
+`trigger_delay` configures how long ATS9371 waits after receiving the marker
+before acquisition begins. The hardware delay must be identical for every
+sequence step.
+
+When `compiled.acquire(...)` starts, its compatibility wrapper delegates to
+`AWGAlazar`. The coordinator applies the ADC channel, demodulation frequency,
+trigger delay, and integration time to the ATS9371, uploads the compiled AWG
+sequence when needed, and collects the result.
+`integrate_time` averages IQ from the beginning of the acquired trace; it must
+fit inside both the readout length and hardware acquisition window.
+
 It intentionally resembles QICK's program style:
 
 ```python
@@ -67,7 +146,9 @@ class SpectroscopyProgram(ExperimentProgram):
             adc_channel="CHA",
             length=1 * us,
             demod_freq=cfg["f_res"],
+            waveform_ch=3,
             marker_channel=1,
+            integrate_time=800 * ns,
         )
 
         frequency = self.add_sweep(
@@ -95,7 +176,7 @@ class SpectroscopyProgram(ExperimentProgram):
     def _body(self, cfg):
         self.play("probe", at=0)
         self.play("readout", at=0)
-        self.trigger("ro", at=650 * ns)
+        self.trigger("ro", trigger_delay=0)
 ```
 
 Compile without hardware to inspect generated assets:
@@ -140,8 +221,12 @@ Explicit `at` allows overlapping pulses:
 ```python
 self.play("probe", at=0)
 self.play("readout", at=0)
-self.trigger("ro", at=650 * ns)
+self.trigger("ro", trigger_delay=650 * ns)
 ```
+
+Here `at` controls pulse placement. The marker follows the active waveform on
+the readout's `waveform_ch`; `trigger_delay` is applied by ATS after receiving
+that marker.
 
 ## Power Rabi
 
@@ -224,6 +309,8 @@ No automatic average is performed by `shots()`.
 
 - Sweeps are compile-time AWG sequence expansion, not FPGA runtime loops.
 - The current backend supports one readout named `"ro"`.
+- The compiler produces a hardware-independent plan. Hardware upload and
+  acquisition execution are owned by `AWGAlazar`.
 - Sweep axes use Cartesian expansion when more than one axis is declared.
 - Conditional playback currently supports equality checks such as
   `when=("state", "e")`.

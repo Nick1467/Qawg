@@ -50,8 +50,8 @@ traces are averaged along the first axis.
 import numpy as np
 import matplotlib.pyplot as plt
 
-from awg_alazar import AWGAlazar
-from awg5200 import (
+from QAWG.awg_alazar import AWGAlazar
+from QAWG.awg5200 import (
     align_channels,
     delay_auto,
     gaussian,

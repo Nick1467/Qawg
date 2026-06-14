@@ -4,15 +4,15 @@ import unittest
 
 import numpy as np
 
-from alazar.ats9371 import configure_clock
-from alazar.constants import (
+from QAWG.alazar.ats9371 import configure_clock
+from QAWG.alazar.constants import (
     CLOCK_EDGE_RISING,
     EXTERNAL_CLOCK_10MHZ_REF,
     EXTERNAL_SAMPLE_RATE_1000MSPS,
     INTERNAL_CLOCK,
     SAMPLE_RATE_1000MSPS,
 )
-from alazar.demodulation import (
+from QAWG.alazar.demodulation import (
     correct_interleaving_offsets,
     recover_clock_referenced_envelope,
     recover_coherent_envelope,

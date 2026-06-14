@@ -32,9 +32,9 @@ def declare_standard_hardware(
         adc_channel=cfg.get("adc_channel", "CHA"),
         length=cfg.get("ro_len", 1 * us),
         demod_freq=cfg["f_res"],
+        waveform_ch=cfg.get("res_ch", 3),
         marker_channel=cfg.get("marker_ch", 1),
-        integrate_start=cfg.get("integrate_start", 0.0),
-        integrate_stop=cfg.get("integrate_stop"),
+        integrate_time=cfg.get("integrate_time"),
     )
 
 
@@ -70,7 +70,10 @@ class PulseProbeSpectroscopyProgram(ExperimentProgram):
     def _body(self, cfg: dict[str, Any]) -> None:
         self.play("qubit_pulse", at=0)
         self.play("res_pulse", at=cfg.get("res_start", 0))
-        self.trigger("ro", at=cfg.get("trig_time", 0))
+        self.trigger(
+            "ro",
+            trigger_delay=cfg.get("trigger_delay", 0),
+        )
 
 
 class PowerRabiProgram(ExperimentProgram):
@@ -106,7 +109,10 @@ class PowerRabiProgram(ExperimentProgram):
         self.play("qubit_pulse")
         self.delay_auto(cfg.get("qubit_to_readout", 40 * ns))
         self.play("res_pulse")
-        self.trigger("ro", at=cfg["qubit_len"] + cfg.get("qubit_to_readout", 40 * ns))
+        self.trigger(
+            "ro",
+            trigger_delay=cfg.get("trigger_delay", 0),
+        )
 
 
 class T1Program(ExperimentProgram):
@@ -143,7 +149,10 @@ class T1Program(ExperimentProgram):
         self.play("pi_pulse")
         self.delay_auto(self.delay_sweep)
         self.play("res_pulse")
-        self.trigger("ro", at=cfg["pi_len"] + self.delay_sweep)
+        self.trigger(
+            "ro",
+            trigger_delay=cfg.get("trigger_delay", 0),
+        )
 
 
 class SingleShotProgram(ExperimentProgram):
@@ -177,5 +186,5 @@ class SingleShotProgram(ExperimentProgram):
         self.play("res_pulse", at=cfg["pi_len"] + cfg.get("readout_delay", 40 * ns))
         self.trigger(
             "ro",
-            at=cfg["pi_len"] + cfg.get("readout_delay", 40 * ns),
+            trigger_delay=cfg.get("trigger_delay", 0),
         )

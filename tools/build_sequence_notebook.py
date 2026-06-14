@@ -47,8 +47,8 @@ between points.
 import numpy as np
 import matplotlib.pyplot as plt
 
-from awg_alazar import AWGAlazar
-from awg5200 import gaussian_square_ns, marker_window_ns
+from QAWG.awg_alazar import AWGAlazar
+from QAWG.awg5200 import gaussian_square_ns, marker_window_ns
 """
     ),
     markdown("## Experiment parameters"),

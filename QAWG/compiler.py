@@ -9,7 +9,14 @@ from typing import Any, Union
 import numpy as np
 import numpy.typing as npt
 
-from awg5200.waveforms import MIN_WAVEFORM_SAMPLES
+from .awg5200.waveforms import (
+    MIN_WAVEFORM_SAMPLES,
+    constant,
+    gaussian,
+    gaussian_square,
+    modulate_envelope,
+    trigger_channel_for,
+)
 
 ns = 1e-9
 us = 1e-6
@@ -117,13 +124,13 @@ class ReadoutDeclaration:
     adc_channel: str | int
     length_s: float
     demod_frequency_hz: float
+    waveform_channel: int | None
     marker_channel: int
     marker_number: int = 1
-    marker_width_s: float = 40 * ns
+    marker_length_s: float | None = None
     marker_low_volts: float = 0.0
     marker_high_volts: float = 1.2
-    integrate_start_s: float = 0.0
-    integrate_stop_s: float | None = None
+    integrate_time_s: float | None = None
 
 
 @dataclass(frozen=True)
@@ -154,7 +161,7 @@ class DelayEvent:
 @dataclass(frozen=True)
 class TriggerEvent:
     readout_name: str
-    at_s: ValueExpression | None
+    trigger_delay_s: ValueExpression
 
 
 ProgramEvent = Union[PlayEvent, DelayEvent, TriggerEvent]
@@ -176,7 +183,7 @@ class ScheduledPulse:
 class ScheduledPoint:
     coordinates: dict[str, Any]
     pulses: tuple[ScheduledPulse, ...]
-    triggers_s: dict[str, float]
+    trigger_delays_s: dict[str, float]
     duration_s: float
 
 
@@ -223,7 +230,7 @@ class ExperimentResult:
 
 @dataclass
 class CompiledExperiment:
-    """Rendered sequence assets and the record-layout contract."""
+    """Rendered sequence plan and record-layout contract."""
 
     program_name: str
     sample_rate_hz: float
@@ -233,9 +240,9 @@ class CompiledExperiment:
     channel_waveforms: dict[int, npt.NDArray[np.float64]]
     marker_waveforms: npt.NDArray[np.bool_]
     readout: ReadoutDeclaration
+    trigger_delay_s: float
     channel_amplitudes_vpp: dict[int, float]
     _hardware: Any | None = None
-    _uploaded_hardware_id: int | None = None
 
     @property
     def number_of_sequence_steps(self) -> int:
@@ -252,82 +259,12 @@ class CompiledExperiment:
         return self
 
     def upload(self, hardware: Any | None = None) -> str:
+        """Compatibility wrapper delegated to the hardware coordinator."""
         target = hardware or self._hardware
         if target is None:
             raise RuntimeError("Bind an AWGAlazar instance before upload")
-        target.awg.clear_all()
-
-        tracks: dict[int, list[str]] = {
-            channel: [] for channel in self.channel_waveforms
-        }
-        tracks.setdefault(self.readout.marker_channel, [])
-
-        for step_index in range(self.number_of_sequence_steps):
-            for channel, waveforms in self.channel_waveforms.items():
-                markers: tuple[npt.NDArray[np.bool_], ...] = ()
-                if channel == self.readout.marker_channel:
-                    markers = self._marker_tuple(step_index)
-                asset_name = target.awg.upload_waveform_asset(
-                    name=f"{self.program_name}_s{step_index:04d}_ch{channel}",
-                    waveform_volts=waveforms[step_index],
-                    amplitude_vpp=self.channel_amplitudes_vpp[channel],
-                    markers=markers,
-                )
-                tracks[channel].append(asset_name)
-
-            marker_channel = self.readout.marker_channel
-            if marker_channel not in self.channel_waveforms:
-                zero = np.zeros(self.marker_waveforms.shape[1])
-                asset_name = target.awg.upload_waveform_asset(
-                    name=f"{self.program_name}_s{step_index:04d}_marker",
-                    waveform_volts=zero,
-                    amplitude_vpp=0.5,
-                    markers=self._marker_tuple(step_index),
-                )
-                tracks[marker_channel].append(asset_name)
-
-        for channel, amplitude_vpp in self.channel_amplitudes_vpp.items():
-            target.awg.set_channel_amplitude(channel, amplitude_vpp)
-            target.awg.set_channel_resolution(
-                channel,
-                16 - self.readout.marker_number
-                if channel == self.readout.marker_channel
-                else 16,
-            )
-        if self.readout.marker_channel not in self.channel_amplitudes_vpp:
-            target.awg.set_channel_amplitude(
-                self.readout.marker_channel,
-                0.5,
-            )
-            target.awg.set_channel_resolution(
-                self.readout.marker_channel,
-                16 - self.readout.marker_number,
-            )
-        target.awg.set_marker_levels(
-            self.readout.marker_channel,
-            self.readout.marker_number,
-            self.readout.marker_low_volts,
-            self.readout.marker_high_volts,
-        )
-
-        sequence_name = target.awg.create_sequence(
-            self.program_name,
-            tracks=tracks,
-            repetitions=1,
-            goto_step=1,
-        )
         self._hardware = target
-        self._uploaded_hardware_id = id(target)
-        return sequence_name
-
-    def _marker_tuple(
-        self, step_index: int
-    ) -> tuple[npt.NDArray[np.bool_], ...]:
-        active = self.marker_waveforms[step_index]
-        return tuple(
-            active if marker == self.readout.marker_number else np.zeros_like(active)
-            for marker in range(1, self.readout.marker_number + 1)
-        )
+        return target.upload_compiled_experiment(self)
 
     def acquire(
         self,
@@ -336,50 +273,15 @@ class CompiledExperiment:
         hardware: Any | None = None,
         filter_type: str = "boxcar",
     ) -> ExperimentResult:
+        """Compatibility wrapper delegated to the hardware coordinator."""
         target = hardware or self._hardware
         if target is None:
             raise RuntimeError("Bind an AWGAlazar instance before acquire")
-        if self._uploaded_hardware_id != id(target):
-            self.upload(target)
-
-        raw_time_s, _, iq_time_s, _ = target.acquire_sequence_traces(
-            number_of_steps=self.number_of_sequence_steps,
-            number_of_averages=n_average,
+        self._hardware = target
+        return target.acquire_compiled_experiment(
+            self,
+            n_average=n_average,
             filter_type=filter_type,
-        )
-        raw = target.last_sequence_records_volts
-        iq_traces = target.last_sequence_shot_iq
-        if raw is None or iq_traces is None:
-            raise RuntimeError("Sequence acquisition did not return records")
-
-        integrate_start = max(
-            0,
-            int(round(self.readout.integrate_start_s * target.alazar_sample_rate_hz)),
-        )
-        integrate_stop_s = (
-            self.readout.integrate_stop_s
-            if self.readout.integrate_stop_s is not None
-            else self.readout.length_s
-        )
-        integrate_stop = min(
-            iq_traces.shape[2],
-            int(round(integrate_stop_s * target.alazar_sample_rate_hz)),
-        )
-        if integrate_start >= integrate_stop:
-            raise ValueError("Readout integration window is empty")
-        iq_shots = np.mean(
-            iq_traces[:, :, integrate_start:integrate_stop],
-            axis=2,
-        )
-        return ExperimentResult(
-            axes={name: values.copy() for name, values in self.axes.items()},
-            point_coordinates=self.point_coordinates,
-            raw=raw.copy(),
-            iq_traces=iq_traces.copy(),
-            iq_shots=iq_shots,
-            raw_time_s=raw_time_s,
-            iq_time_s=iq_time_s,
-            readout_name=self.readout.name,
         )
 
 
@@ -430,25 +332,45 @@ class ExperimentProgram:
         adc_channel: str | int,
         length: float,
         demod_freq: float,
+        waveform_ch: int | None = None,
         marker_channel: int = 1,
         marker_number: int = 1,
-        marker_width: float = 40 * ns,
-        integrate_start: float = 0.0,
-        integrate_stop: float | None = None,
+        marker_length: float | None = None,
+        integrate_time: float | None = None,
     ) -> None:
-        if name in self.readouts:
-            raise ValueError(f"Readout {name!r} is already declared")
+        if name != "ro":
+            raise ValueError("The current compiler supports only readout 'ro'")
+        if self.readouts:
+            raise ValueError("The current compiler supports only one readout")
+        if length <= 0:
+            raise ValueError("Readout length must be positive")
+        if integrate_time is not None and integrate_time <= 0:
+            raise ValueError("Readout integrate_time must be positive")
+        if integrate_time is not None and integrate_time > length:
+            raise ValueError(
+                "Readout integrate_time cannot exceed readout length"
+            )
+        if waveform_ch is None and marker_length is None:
+            raise ValueError("Provide waveform_ch or marker_length")
+        if waveform_ch is not None and marker_length is not None:
+            raise ValueError("Use waveform_ch or marker_length, not both")
+        if marker_length is not None and marker_length <= 0:
+            raise ValueError("Readout marker_length must be positive")
         self.readouts[name] = ReadoutDeclaration(
             name=name,
             adc_channel=adc_channel,
             length_s=float(length),
             demod_frequency_hz=float(demod_freq),
+            waveform_channel=(
+                None if waveform_ch is None else int(waveform_ch)
+            ),
             marker_channel=marker_channel,
             marker_number=marker_number,
-            marker_width_s=float(marker_width),
-            integrate_start_s=float(integrate_start),
-            integrate_stop_s=(
-                None if integrate_stop is None else float(integrate_stop)
+            marker_length_s=(
+                None if marker_length is None else float(marker_length)
+            ),
+            integrate_time_s=(
+                None if integrate_time is None else float(integrate_time)
             ),
         )
 
@@ -522,14 +444,14 @@ class ExperimentProgram:
         self,
         readout: str = "ro",
         *,
-        at: ValueLike | None = None,
+        trigger_delay: ValueLike = 0.0,
     ) -> None:
         if readout not in self.readouts:
             raise KeyError(f"Readout {readout!r} is not declared")
         self.events.append(
             TriggerEvent(
                 readout_name=readout,
-                at_s=None if at is None else as_expression(at),
+                trigger_delay_s=as_expression(trigger_delay),
             )
         )
 
@@ -549,6 +471,14 @@ class ExperimentProgram:
             raise ValueError("sample_rate_hz must be positive")
         points, axes = self._sweep_points()
         scheduled = tuple(self._schedule_point(point) for point in points)
+        trigger_delays = {
+            point.trigger_delays_s["ro"] for point in scheduled
+        }
+        if len(trigger_delays) != 1:
+            raise ValueError(
+                "ATS trigger_delay must be the same for every sequence step"
+            )
+        trigger_delay_s = trigger_delays.pop()
         step_duration_s = max(point.duration_s for point in scheduled)
         step_samples = max(
             MIN_WAVEFORM_SAMPLES,
@@ -564,6 +494,28 @@ class ExperimentProgram:
             for channel in channel_amplitudes
         }
         readout = self.readouts["ro"]
+        integrate_time_s = (
+            readout.length_s
+            if readout.integrate_time_s is None
+            else readout.integrate_time_s
+        )
+        if (
+            hardware is not None
+            and hasattr(hardware, "acquire_window_ns")
+            and integrate_time_s * 1e9 > hardware.acquire_window_ns
+        ):
+            raise ValueError(
+                "Readout integration window exceeds the hardware "
+                "acquisition window"
+            )
+        if (
+            readout.waveform_channel is not None
+            and readout.waveform_channel not in channel_waveforms
+        ):
+            raise ValueError(
+                f"Readout waveform_ch {readout.waveform_channel} "
+                "is not a declared generator channel"
+            )
         markers = np.zeros((len(points), step_samples), dtype=np.bool_)
 
         for point_index, scheduled_point in enumerate(scheduled):
@@ -576,14 +528,18 @@ class ExperimentProgram:
                     point_index, start:stop
                 ] += values
 
-            trigger_s = scheduled_point.triggers_s["ro"]
-            marker_start = int(round(trigger_s * sample_rate_hz))
-            marker_stop = min(
-                step_samples,
-                marker_start
-                + max(1, int(round(readout.marker_width_s * sample_rate_hz))),
-            )
-            markers[point_index, marker_start:marker_stop] = True
+            if readout.waveform_channel is None:
+                active_marker = np.zeros(step_samples, dtype=np.bool_)
+                marker_samples = max(
+                    1,
+                    int(round(readout.marker_length_s * sample_rate_hz)),
+                )
+                active_marker[:marker_samples] = True
+            else:
+                _, active_marker = trigger_channel_for(
+                    channel_waveforms[readout.waveform_channel][point_index],
+                )
+            markers[point_index] = active_marker
 
         return CompiledExperiment(
             program_name=self.name,
@@ -594,6 +550,7 @@ class ExperimentProgram:
             channel_waveforms=channel_waveforms,
             marker_waveforms=markers,
             readout=readout,
+            trigger_delay_s=trigger_delay_s,
             channel_amplitudes_vpp=channel_amplitudes,
             _hardware=hardware,
         )
@@ -614,7 +571,7 @@ class ExperimentProgram:
     def _schedule_point(self, point: dict[str, Any]) -> ScheduledPoint:
         cursor_s = 0.0
         pulses: list[ScheduledPulse] = []
-        triggers: dict[str, float] = {}
+        trigger_delays: dict[str, float] = {}
         for event in self.events:
             if isinstance(event, DelayEvent):
                 cursor_s += event.duration_s.resolve(point)
@@ -657,30 +614,47 @@ class ExperimentProgram:
                 if event.at_s is None:
                     cursor_s = stop_s
                 continue
-            trigger_s = (
-                cursor_s if event.at_s is None else event.at_s.resolve(point)
-            )
-            if trigger_s < 0:
-                raise ValueError("Trigger time cannot be negative")
-            triggers[event.readout_name] = trigger_s
+            trigger_delay_s = event.trigger_delay_s.resolve(point)
+            if trigger_delay_s < 0:
+                raise ValueError("ATS trigger_delay cannot be negative")
+            trigger_delays[event.readout_name] = trigger_delay_s
 
-        if "ro" not in triggers:
+        if "ro" not in trigger_delays:
             raise ValueError("Program body must trigger the 'ro' readout")
-        readout_stops = [
-            trigger_s + self.readouts[name].length_s
-            for name, trigger_s in triggers.items()
-        ]
+        readout = self.readouts["ro"]
+        if readout.waveform_channel is None:
+            readout_stop = readout.length_s
+        else:
+            reference_generators = {
+                name
+                for name, declaration in self.generators.items()
+                if declaration.channel == readout.waveform_channel
+            }
+            reference_pulses = [
+                pulse
+                for pulse in pulses
+                if pulse.definition.generator in reference_generators
+            ]
+            if not reference_pulses:
+                raise ValueError(
+                    f"Readout waveform_ch {readout.waveform_channel} "
+                    "has no active pulse"
+                )
+            readout_stop = (
+                min(pulse.start_s for pulse in reference_pulses)
+                + readout.length_s
+            )
         duration_s = max(
             [
                 cursor_s,
                 *[pulse.stop_s for pulse in pulses],
-                *readout_stops,
+                readout_stop,
             ]
         ) + self.final_delay_s
         return ScheduledPoint(
             coordinates=point.copy(),
             pulses=tuple(pulses),
-            triggers_s=triggers,
+            trigger_delays_s=trigger_delays,
             duration_s=duration_s,
         )
 
@@ -693,17 +667,18 @@ class ExperimentProgram:
             1,
             int(round((pulse.stop_s - pulse.start_s) * sample_rate_hz)),
         )
-        time_s = np.arange(count, dtype=np.float64) / sample_rate_hz
         style = pulse.definition.style
         if style == "const":
-            envelope = np.full(count, pulse.gain, dtype=np.float64)
+            envelope = constant(count, pulse.gain)
         elif style == "gaussian":
             sigma_s = pulse.sigma_s
             if sigma_s is None or sigma_s <= 0:
                 raise ValueError("Gaussian pulses require sigma > 0")
-            center_s = time_s[-1] / 2.0
-            envelope = pulse.gain * np.exp(
-                -0.5 * ((time_s - center_s) / sigma_s) ** 2
+            envelope = gaussian(
+                count,
+                sample_rate_hz,
+                sigma_s,
+                pulse.gain,
             )
         else:
             sigma_s = pulse.edge_sigma_s
@@ -711,22 +686,21 @@ class ExperimentProgram:
                 raise ValueError(
                     "Gaussian-square pulses require edge_sigma > 0"
                 )
-            edge_samples = max(1, int(round(3.0 * sigma_s * sample_rate_hz)))
-            if 2 * edge_samples > count:
+            try:
+                envelope = gaussian_square(
+                    count,
+                    sample_rate_hz,
+                    sigma_s,
+                    pulse.gain,
+                )
+            except ValueError as exc:
                 raise ValueError(
                     "Gaussian-square pulse is too short for edge_sigma"
-                )
-            x = np.arange(edge_samples, dtype=np.float64)
-            rise = np.exp(
-                -0.5 * ((x - (edge_samples - 1)) / max(1.0, edge_samples / 3)) ** 2
-            )
-            envelope = np.full(count, pulse.gain, dtype=np.float64)
-            envelope[:edge_samples] *= rise
-            envelope[-edge_samples:] *= rise[::-1]
+                ) from exc
 
-        if pulse.frequency_hz == 0:
-            return envelope
-        return envelope * np.sin(
-            2.0 * np.pi * pulse.frequency_hz * time_s
-            + pulse.phase_radians
+        return modulate_envelope(
+            envelope,
+            sample_rate_hz,
+            pulse.frequency_hz,
+            pulse.phase_radians,
         )

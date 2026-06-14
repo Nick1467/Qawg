@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 from contextlib import suppress
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import numpy.typing as npt
 
-from alazar import (
+from .alazar import (
     ATSApi,
     AcquisitionConfig,
     AlazarProcessor,
@@ -24,13 +24,18 @@ from alazar import (
     start_capture,
     wait_for_capture,
 )
-from alazar.constants import (
+from .alazar.constants import (
     CHANNEL_A,
     CHANNEL_B,
     MIN_SAMPLES_PER_RECORD,
     SAMPLES_PER_RECORD_ALIGNMENT,
+    TRIGGER_SLOPE_NEGATIVE,
+    TRIGGER_SLOPE_POSITIVE,
 )
-from awg5200 import AWG5208
+from .awg5200 import AWG5208
+
+if TYPE_CHECKING:
+    from .compiler import CompiledExperiment, ExperimentResult
 
 
 def seconds_to_samples(duration_s: float, sample_rate_hz: float) -> int:
@@ -79,6 +84,22 @@ def normalize_adc_channel(channel: str | int) -> int:
     raise ValueError("adc_channel must be 'CHA', 'CHB', 0, or 1")
 
 
+def normalize_trigger_slope(slope: str | int) -> int:
+    """Map rising/falling names to ATS trigger-slope constants."""
+    if isinstance(slope, str):
+        name = slope.strip().lower()
+        if name in {"rising", "positive"}:
+            return TRIGGER_SLOPE_POSITIVE
+        if name in {"falling", "negative"}:
+            return TRIGGER_SLOPE_NEGATIVE
+    elif slope in (TRIGGER_SLOPE_POSITIVE, TRIGGER_SLOPE_NEGATIVE):
+        return int(slope)
+    raise ValueError(
+        "trigger_slope must be 'rising', 'falling', "
+        "TRIGGER_SLOPE_POSITIVE, or TRIGGER_SLOPE_NEGATIVE"
+    )
+
+
 class AWGAlazar:
     """Coordinate AWG playback, triggered acquisition, and IQ averaging."""
 
@@ -90,13 +111,15 @@ class AWGAlazar:
         *,
         awg_sample_rate_hz: float,
         alazar_sample_rate_hz: float,
-        tone_frequency_hz: float,
-        trigger_delay_s: float,
         acquire_window_ns: float,
-        integrate_window_ns: tuple[float, float],
+        tone_frequency_hz: float = 0.0,
+        trigger_delay_s: float = 0.0,
+        integrate_time_s: float | None = None,
+        integrate_window_ns: tuple[float, float] | None = None,
         adc_channel: str | int = "CHA",
         moving_average_time_s: float = 20e-9,
         reference_phase_radians: float = 0.0,
+        trigger_slope: str | int = "rising",
         trigger_level: int = 140,
         input_range_volts: float = 0.4,
         timeout_ms: int = 5000,
@@ -113,13 +136,32 @@ class AWGAlazar:
         self.tone_frequency_hz = float(tone_frequency_hz)
         self.trigger_delay_s = float(trigger_delay_s)
         self.acquire_window_ns = float(acquire_window_ns)
-        self.integrate_window_ns = (
-            float(integrate_window_ns[0]),
-            float(integrate_window_ns[1]),
-        )
+        if integrate_time_s is not None and integrate_window_ns is not None:
+            raise ValueError(
+                "Use integrate_time_s or integrate_window_ns, not both"
+            )
+        if integrate_time_s is not None:
+            self.integrate_time_s = float(integrate_time_s)
+            self.integrate_window_ns = (
+                0.0,
+                self.integrate_time_s * 1e9,
+            )
+        elif integrate_window_ns is not None:
+            self.integrate_window_ns = (
+                float(integrate_window_ns[0]),
+                float(integrate_window_ns[1]),
+            )
+            self.integrate_time_s = (
+                self.integrate_window_ns[1]
+                - self.integrate_window_ns[0]
+            ) * 1e-9
+        else:
+            self.integrate_time_s = self.acquire_window_ns * 1e-9
+            self.integrate_window_ns = (0.0, self.acquire_window_ns)
         self.adc_channel = normalize_adc_channel(adc_channel)
         self.moving_average_time_s = float(moving_average_time_s)
         self.reference_phase_radians = float(reference_phase_radians)
+        self.trigger_slope = normalize_trigger_slope(trigger_slope)
         self.trigger_level = int(trigger_level)
         self.input_range_volts = float(input_range_volts)
         self.timeout_ms = int(timeout_ms)
@@ -141,6 +183,7 @@ class AWGAlazar:
         self.last_sequence_shot_iq: (
             npt.NDArray[np.complex128] | None
         ) = None
+        self._uploaded_compiled: CompiledExperiment | None = None
 
         self._validate_settings()
         self.processor = AlazarProcessor(self.alazar_sample_rate_hz)
@@ -152,16 +195,29 @@ class AWGAlazar:
         *,
         awg_sample_rate_hz: float,
         alazar_sample_rate_hz: float = 1e9,
-        tone_frequency_hz: float,
-        trigger_delay_s: float,
-        acquire_window_ns: float,
-        integrate_window_ns: tuple[float, float],
+        acquire_window_s: float | None = None,
+        acquire_window_ns: float | None = None,
+        trigger_slope: str | int = "rising",
+        trigger_level: int = 140,
         awg_timeout_ms: int = 60_000,
         ats_system_id: int = 1,
         ats_board_id: int = 1,
         **settings: Any,
     ) -> "AWGAlazar":
-        """Connect both instruments and apply their clock/trigger settings."""
+        """Connect both instruments and apply fixed hardware settings."""
+        if acquire_window_s is None and acquire_window_ns is None:
+            raise ValueError(
+                "Provide acquire_window_s (preferred) or acquire_window_ns"
+            )
+        if acquire_window_s is not None and acquire_window_ns is not None:
+            raise ValueError(
+                "Use acquire_window_s or acquire_window_ns, not both"
+            )
+        requested_window_ns = (
+            float(acquire_window_s) * 1e9
+            if acquire_window_s is not None
+            else float(acquire_window_ns)
+        )
         awg = AWG5208.connect(awg_resource, timeout_ms=awg_timeout_ms)
         try:
             ats_api = ATSApi()
@@ -172,10 +228,9 @@ class AWGAlazar:
                 ats_board,
                 awg_sample_rate_hz=awg_sample_rate_hz,
                 alazar_sample_rate_hz=alazar_sample_rate_hz,
-                tone_frequency_hz=tone_frequency_hz,
-                trigger_delay_s=trigger_delay_s,
-                acquire_window_ns=acquire_window_ns,
-                integrate_window_ns=integrate_window_ns,
+                acquire_window_ns=requested_window_ns,
+                trigger_slope=trigger_slope,
+                trigger_level=trigger_level,
                 **settings,
             )
             experiment.configure()
@@ -199,6 +254,8 @@ class AWGAlazar:
             raise ValueError("tone_frequency_hz must be between DC and Nyquist")
         if self.trigger_delay_s < 0:
             raise ValueError("trigger_delay_s cannot be negative")
+        if not 0 <= self.trigger_level <= 255:
+            raise ValueError("trigger_level must be an ATS code from 0 to 255")
         if self.acquire_window_ns <= 0:
             raise ValueError("acquire_window_ns must be positive")
         integrate_start_ns, integrate_stop_ns = self.integrate_window_ns
@@ -287,7 +344,7 @@ class AWGAlazar:
         ) * 1e9
 
     def configure(self) -> None:
-        """Configure clocks, AWG mode/sample rate, and the ATS trigger delay."""
+        """Configure clocks, AWG mode/sample rate, and current ATS settings."""
         self.awg.set_awg_mode()
         if self.use_external_10mhz_reference:
             self.awg.use_external_10mhz_reference()
@@ -296,12 +353,194 @@ class AWGAlazar:
             self.ats_api,
             self.ats_board,
             TriggerConfig(
+                slope=self.trigger_slope,
                 level=self.trigger_level,
                 delay_samples=self.trigger_delay_samples,
                 timeout_ticks=0,
             ),
             use_external_10mhz_reference=self.use_external_10mhz_reference,
             channel=self.adc_channel,
+        )
+
+    def configure_experiment(
+        self,
+        *,
+        tone_frequency_hz: float,
+        trigger_delay_s: float,
+        integrate_time_s: float,
+        adc_channel: str | int,
+    ) -> None:
+        """Apply readout settings owned by one compiled experiment."""
+        self.tone_frequency_hz = float(tone_frequency_hz)
+        self.trigger_delay_s = float(trigger_delay_s)
+        self.integrate_time_s = float(integrate_time_s)
+        self.integrate_window_ns = (0.0, self.integrate_time_s * 1e9)
+        self.adc_channel = normalize_adc_channel(adc_channel)
+        self._validate_settings()
+        configure_ats9371(
+            self.ats_api,
+            self.ats_board,
+            TriggerConfig(
+                slope=self.trigger_slope,
+                level=self.trigger_level,
+                delay_samples=self.trigger_delay_samples,
+                timeout_ticks=0,
+            ),
+            use_external_10mhz_reference=self.use_external_10mhz_reference,
+            channel=self.adc_channel,
+        )
+
+    @staticmethod
+    def _compiled_marker_tuple(
+        compiled: "CompiledExperiment",
+        step_index: int,
+    ) -> tuple[npt.NDArray[np.bool_], ...]:
+        active = compiled.marker_waveforms[step_index]
+        return tuple(
+            active
+            if marker == compiled.readout.marker_number
+            else np.zeros_like(active)
+            for marker in range(1, compiled.readout.marker_number + 1)
+        )
+
+    def upload_compiled_experiment(
+        self,
+        compiled: "CompiledExperiment",
+    ) -> str:
+        """Materialize and upload one compiler-generated AWG sequence plan."""
+        self.awg.clear_all()
+        tracks: dict[int, list[str]] = {
+            channel: [] for channel in compiled.channel_waveforms
+        }
+        tracks.setdefault(compiled.readout.marker_channel, [])
+
+        for step_index in range(compiled.number_of_sequence_steps):
+            for channel, waveforms in compiled.channel_waveforms.items():
+                markers: tuple[npt.NDArray[np.bool_], ...] = ()
+                if channel == compiled.readout.marker_channel:
+                    markers = self._compiled_marker_tuple(
+                        compiled,
+                        step_index,
+                    )
+                asset_name = self.awg.upload_waveform_asset(
+                    name=(
+                        f"{compiled.program_name}_s{step_index:04d}"
+                        f"_ch{channel}"
+                    ),
+                    waveform_volts=waveforms[step_index],
+                    amplitude_vpp=compiled.channel_amplitudes_vpp[channel],
+                    markers=markers,
+                )
+                tracks[channel].append(asset_name)
+
+            marker_channel = compiled.readout.marker_channel
+            if marker_channel not in compiled.channel_waveforms:
+                zero = np.zeros(compiled.marker_waveforms.shape[1])
+                asset_name = self.awg.upload_waveform_asset(
+                    name=(
+                        f"{compiled.program_name}_s{step_index:04d}_marker"
+                    ),
+                    waveform_volts=zero,
+                    amplitude_vpp=0.5,
+                    markers=self._compiled_marker_tuple(
+                        compiled,
+                        step_index,
+                    ),
+                )
+                tracks[marker_channel].append(asset_name)
+
+        for channel, amplitude_vpp in (
+            compiled.channel_amplitudes_vpp.items()
+        ):
+            self.awg.set_channel_amplitude(channel, amplitude_vpp)
+            self.awg.set_channel_resolution(
+                channel,
+                16 - compiled.readout.marker_number
+                if channel == compiled.readout.marker_channel
+                else 16,
+            )
+        if (
+            compiled.readout.marker_channel
+            not in compiled.channel_amplitudes_vpp
+        ):
+            self.awg.set_channel_amplitude(
+                compiled.readout.marker_channel,
+                0.5,
+            )
+            self.awg.set_channel_resolution(
+                compiled.readout.marker_channel,
+                16 - compiled.readout.marker_number,
+            )
+        self.awg.set_marker_levels(
+            compiled.readout.marker_channel,
+            compiled.readout.marker_number,
+            compiled.readout.marker_low_volts,
+            compiled.readout.marker_high_volts,
+        )
+
+        sequence_name = self.awg.create_sequence(
+            compiled.program_name,
+            tracks=tracks,
+            repetitions=1,
+            goto_step=1,
+        )
+        self._uploaded_compiled = compiled
+        return sequence_name
+
+    def acquire_compiled_experiment(
+        self,
+        compiled: "CompiledExperiment",
+        n_average: int,
+        *,
+        filter_type: str = "boxcar",
+    ) -> "ExperimentResult":
+        """Configure, execute, and collect one compiled experiment plan."""
+        from .compiler import ExperimentResult
+
+        integrate_time_s = (
+            compiled.readout.length_s
+            if compiled.readout.integrate_time_s is None
+            else compiled.readout.integrate_time_s
+        )
+        self.configure_experiment(
+            tone_frequency_hz=compiled.readout.demod_frequency_hz,
+            trigger_delay_s=compiled.trigger_delay_s,
+            integrate_time_s=integrate_time_s,
+            adc_channel=compiled.readout.adc_channel,
+        )
+        if self._uploaded_compiled is not compiled:
+            self.upload_compiled_experiment(compiled)
+
+        raw_time_s, _, iq_time_s, _ = self.acquire_sequence_traces(
+            number_of_steps=compiled.number_of_sequence_steps,
+            number_of_averages=n_average,
+            filter_type=filter_type,
+        )
+        raw = self.last_sequence_records_volts
+        iq_traces = self.last_sequence_shot_iq
+        if raw is None or iq_traces is None:
+            raise RuntimeError("Sequence acquisition did not return records")
+
+        integrate_start, integrate_stop = self.integrate_window_cycles
+        integrate_stop = min(iq_traces.shape[2], integrate_stop)
+        if integrate_start >= integrate_stop:
+            raise ValueError("Readout integration window is empty")
+        iq_shots = np.mean(
+            iq_traces[:, :, integrate_start:integrate_stop],
+            axis=2,
+        )
+        return ExperimentResult(
+            axes={
+                name: values.copy()
+                for name, values in compiled.axes.items()
+            },
+            point_coordinates=compiled.point_coordinates,
+            raw=raw.copy(),
+            iq_traces=iq_traces.copy(),
+            iq_shots=iq_shots,
+            raw_time_s=raw_time_s,
+            iq_time_s=iq_time_s,
+            readout_name=compiled.readout.name,
         )
 
     def _acquisition_config(self, n_average: int) -> AcquisitionConfig:

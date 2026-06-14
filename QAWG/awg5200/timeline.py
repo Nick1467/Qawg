@@ -8,7 +8,11 @@ from typing import Literal
 import numpy as np
 import numpy.typing as npt
 
-from .waveforms import MIN_WAVEFORM_SAMPLES, FloatArray
+from .waveforms import (
+    MIN_WAVEFORM_SAMPLES,
+    FloatArray,
+    modulate_envelope,
+)
 
 
 @dataclass(frozen=True)
@@ -169,18 +173,17 @@ def _render_channels(
     }
 
     for pulse, start in scheduled:
-        if not modulate or pulse.fc == 0:
-            carrier = np.ones(pulse.envelope.size, dtype=np.float64)
-        else:
-            local_time = (
-                np.arange(pulse.envelope.size, dtype=np.float64) / sample_rate_hz
+        values = (
+            modulate_envelope(
+                pulse.envelope,
+                sample_rate_hz,
+                pulse.fc,
+                pulse.phase_radians,
             )
-            carrier = np.sin(
-                2.0 * np.pi * pulse.fc * local_time + pulse.phase_radians
-            )
-        channels[pulse.ch][start : start + pulse.envelope.size] += (
-            pulse.envelope * carrier
+            if modulate
+            else pulse.envelope
         )
+        channels[pulse.ch][start : start + pulse.envelope.size] += values
     return channels
 
 

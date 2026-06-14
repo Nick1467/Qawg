@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ctypes
+import math
 import sys
 from contextlib import suppress
 from dataclasses import dataclass
@@ -34,6 +35,7 @@ from .constants import (
     TRIG_ENGINE_K,
     TRIG_ENGINE_OP_J,
     TRIG_EXTERNAL,
+    TRIGGER_SLOPE_NEGATIVE,
     TRIGGER_SLOPE_POSITIVE,
 )
 from .demodulation import _dispersive_demodulate
@@ -55,6 +57,7 @@ class BoardInfo:
 class TriggerConfig:
     coupling: int = DC_COUPLING
     trigger_range: int = ETR_TTL
+    slope: int = TRIGGER_SLOPE_POSITIVE
     level: int = 140
     delay_samples: int = 0
     timeout_ticks: int = 0
@@ -77,13 +80,10 @@ class AcquisitionConfig:
         min_samples = MIN_SAMPLES_PER_RECORD
         
         raw_samples = self.samples_per_record
-        rounded = int(round(raw_samples / alignment)) * alignment
+        rounded = math.ceil(raw_samples / alignment) * alignment
         if rounded < min_samples:
             rounded = min_samples
-            
-        if rounded != raw_samples:
-            print(f"INFO: Aligned samples_per_record from {raw_samples} to {rounded}")
-            
+
         object.__setattr__(self, "samples_per_record", rounded)
 
     @property
@@ -147,7 +147,7 @@ def validate_acquisition_config(config: AcquisitionConfig) -> None:
         )
     if config.dma_buffer_count < 2:
         raise ValueError("dma_buffer_count must be at least 2")
-    if not 0 < config.tone_frequency_hz < config.sample_rate_hz / 2:
+    if not 0 <= config.tone_frequency_hz < config.sample_rate_hz / 2:
         raise ValueError("tone_frequency_hz must be between DC and Nyquist")
 
 
@@ -220,7 +220,7 @@ def configure_external_trigger(
         TRIG_ENGINE_OP_J,
         TRIG_ENGINE_J,
         TRIG_EXTERNAL,
-        TRIGGER_SLOPE_POSITIVE,
+        trigger.slope,
         trigger.level,
         TRIG_ENGINE_K,
         TRIG_DISABLE,

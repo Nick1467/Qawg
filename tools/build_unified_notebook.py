@@ -53,8 +53,8 @@ external marker triggers.
 import numpy as np
 import matplotlib.pyplot as plt
 
-from awg_alazar import AWGAlazar
-from awg5200 import delay, gaussian_square_ns, waveform
+from QAWG.awg_alazar import AWGAlazar
+from QAWG.awg5200 import delay, gaussian_square_ns, waveform
 """
     ),
     markdown("## Experiment parameters"),

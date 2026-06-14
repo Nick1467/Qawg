@@ -7,7 +7,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from awg_alazar import AWGAlazar
+from QAWG.awg_alazar import AWGAlazar
 
 
 AWG_RESOURCE = "TCPIP0::192.168.10.171::inst0::INSTR"

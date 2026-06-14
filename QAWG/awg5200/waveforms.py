@@ -64,6 +64,30 @@ def sine(
     return offset_volts + amplitude_volts * np.sin(phase + phase_radians)
 
 
+def modulate_envelope(
+    envelope: npt.ArrayLike,
+    sample_rate_hz: float,
+    frequency_hz: float,
+    phase_radians: float = 0.0,
+) -> FloatArray:
+    """Apply a sine carrier to one real-valued waveform envelope."""
+    values = np.asarray(envelope, dtype=np.float64).reshape(-1)
+    if values.size < 1:
+        raise ValueError("envelope cannot be empty")
+    if frequency_hz < 0 or frequency_hz > sample_rate_hz / 2:
+        raise ValueError("frequency_hz must be between DC and Nyquist")
+    if frequency_hz == 0:
+        return values.copy()
+    carrier = sine(
+        values.size,
+        sample_rate_hz,
+        frequency_hz,
+        amplitude_volts=1.0,
+        phase_radians=phase_radians,
+    )
+    return values * carrier
+
+
 def gaussian(
     number_of_samples: int,
     sample_rate_hz: float,
@@ -76,6 +100,35 @@ def gaussian(
     time = time_axis(number_of_samples, sample_rate_hz)
     center = time[-1] / 2.0 if center_s is None else center_s
     return amplitude_volts * np.exp(-0.5 * ((time - center) / sigma_s) ** 2)
+
+
+def gaussian_square(
+    number_of_samples: int,
+    sample_rate_hz: float,
+    sigma_s: float,
+    amplitude_volts: float,
+    edge_sigmas: float = 3.0,
+) -> FloatArray:
+    """Return a flat envelope with Gaussian rising and falling edges."""
+    if sigma_s <= 0:
+        raise ValueError("sigma_s must be positive")
+    if edge_sigmas <= 0:
+        raise ValueError("edge_sigmas must be positive")
+    edge_samples = max(
+        1,
+        int(round(edge_sigmas * sigma_s * sample_rate_hz)),
+    )
+    if 2 * edge_samples > number_of_samples:
+        raise ValueError("waveform is too short for the requested Gaussian edges")
+    x = np.arange(edge_samples, dtype=np.float64)
+    sigma_samples = max(1.0, edge_samples / edge_sigmas)
+    rise = np.exp(
+        -0.5 * ((x - (edge_samples - 1)) / sigma_samples) ** 2
+    )
+    envelope = constant(number_of_samples, amplitude_volts)
+    envelope[:edge_samples] *= rise
+    envelope[-edge_samples:] *= rise[::-1]
+    return envelope
 
 
 def gaussian_cosine(

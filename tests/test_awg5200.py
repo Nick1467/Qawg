@@ -5,7 +5,7 @@ import unittest
 
 import numpy as np
 
-from awg5200 import (
+from QAWG.awg5200 import (
     AWG5208,
     TriggerConfig,
     align_channel_envelopes,
@@ -22,8 +22,8 @@ from awg5200 import (
     trigger_channel_for,
     waveform,
 )
-from awg5200.driver import ieee_block
-from awg5200.waveforms import make_wfmx, pack_markers
+from QAWG.awg5200.driver import ieee_block
+from QAWG.awg5200.waveforms import make_wfmx, pack_markers
 
 
 class FakeTransport:

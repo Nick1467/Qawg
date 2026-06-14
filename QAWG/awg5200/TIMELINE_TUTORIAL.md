@@ -37,7 +37,7 @@ parallel(qubit1, qubit2) / delay_auto(10e-9) / readout
 ## 完整範例
 
 ```python
-from awg5200 import (
+from QAWG.awg5200 import (
     AWG5208,
     delay_auto,
     gaussian_square_ns,

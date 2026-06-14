@@ -17,9 +17,13 @@ from .examples import (
     SingleShotProgram,
     T1Program,
 )
+from .awg_alazar import AWGAlazar
+from .awg5200 import AWG5208
 
 __all__ = [
     "CompiledExperiment",
+    "AWG5208",
+    "AWGAlazar",
     "ExperimentProgram",
     "ExperimentResult",
     "LinearSweep",

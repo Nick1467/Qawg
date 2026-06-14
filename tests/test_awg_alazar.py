@@ -1,15 +1,22 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import numpy as np
 
-from alazar import BoardInfo
-from alazar.constants import CHANNEL_A, CHANNEL_B
-from awg_alazar import (
+from QAWG.alazar import BoardInfo
+from QAWG.alazar import AcquisitionConfig
+from QAWG.alazar.constants import CHANNEL_A, CHANNEL_B
+from QAWG.alazar.constants import (
+    TRIGGER_SLOPE_NEGATIVE,
+    TRIGGER_SLOPE_POSITIVE,
+)
+from QAWG.awg_alazar import (
     AWGAlazar,
     normalize_adc_channel,
+    normalize_trigger_slope,
     records_per_buffer_for,
 )
 
@@ -67,6 +74,16 @@ class AWGAlazarTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "CHA.*CHB.*0.*1"):
                     normalize_adc_channel(value)
 
+    def test_trigger_slope_accepts_edge_names(self) -> None:
+        self.assertEqual(
+            normalize_trigger_slope("rising"),
+            TRIGGER_SLOPE_POSITIVE,
+        )
+        self.assertEqual(
+            normalize_trigger_slope("falling"),
+            TRIGGER_SLOPE_NEGATIVE,
+        )
+
     def test_records_per_buffer_is_a_divisor(self) -> None:
         self.assertEqual(records_per_buffer_for(1000), 100)
         self.assertEqual(records_per_buffer_for(32), 32)
@@ -79,6 +96,42 @@ class AWGAlazarTests(unittest.TestCase):
         )
 
         self.assertEqual(experiment.acquire_window_cycles, 1280)
+
+    def test_acquisition_config_alignment_never_shortens_record(self) -> None:
+        config = AcquisitionConfig(
+            tone_frequency_hz=0,
+            samples_per_record=257,
+        )
+
+        self.assertEqual(config.samples_per_record, 384)
+        from QAWG.alazar.ats9371 import validate_acquisition_config
+
+        validate_acquisition_config(config)
+
+    def test_integrate_time_uses_trace_start(self) -> None:
+        experiment = self.make_experiment(
+            acquire_window_ns=1500,
+            integrate_window_ns=None,
+            integrate_time_s=1e-6,
+        )
+
+        self.assertEqual(experiment.integrate_window_cycles, (0, 1000))
+        self.assertEqual(experiment.integrate_samples, 1000)
+
+    def test_integration_defaults_to_requested_acquire_window(self) -> None:
+        experiment = self.make_experiment(
+            acquire_window_ns=1500,
+            integrate_window_ns=None,
+        )
+
+        self.assertEqual(experiment.integrate_window_cycles, (0, 1500))
+
+    def test_rejects_two_integration_forms(self) -> None:
+        with self.assertRaisesRegex(ValueError, "not both"):
+            self.make_experiment(
+                integrate_window_ns=(20, 220),
+                integrate_time_s=100e-9,
+            )
 
     def test_acquire_decimate_returns_time_resolved_average(self) -> None:
         experiment = self.make_experiment()
@@ -243,7 +296,7 @@ class AWGAlazarTests(unittest.TestCase):
     def test_configure_applies_both_sample_clocks_and_trigger_delay(self) -> None:
         experiment = self.make_experiment()
 
-        with patch("awg_alazar.configure_ats9371") as configure:
+        with patch("QAWG.awg_alazar.configure_ats9371") as configure:
             experiment.configure()
 
         experiment.awg.set_awg_mode.assert_called_once_with()
@@ -251,21 +304,94 @@ class AWGAlazarTests(unittest.TestCase):
         experiment.awg.set_sample_rate.assert_called_once_with(2.5e9)
         trigger = configure.call_args.args[2]
         self.assertEqual(trigger.delay_samples, 100)
+        self.assertEqual(trigger.slope, TRIGGER_SLOPE_POSITIVE)
         self.assertEqual(trigger.level, 140)
         self.assertEqual(configure.call_args.kwargs["channel"], CHANNEL_A)
 
     def test_channel_b_is_used_for_configuration_and_acquisition(self) -> None:
         experiment = self.make_experiment(adc_channel=1)
 
-        with patch("awg_alazar.configure_ats9371") as configure:
+        with patch("QAWG.awg_alazar.configure_ats9371") as configure:
             experiment.configure()
 
         self.assertEqual(experiment.adc_channel_name, "CHB")
         self.assertEqual(configure.call_args.kwargs["channel"], CHANNEL_B)
         self.assertEqual(experiment._acquisition_config(4).channel, CHANNEL_B)
 
+    def test_configure_experiment_applies_readout_owned_settings(self) -> None:
+        experiment = self.make_experiment()
+
+        with patch("QAWG.awg_alazar.configure_ats9371") as configure:
+            experiment.configure_experiment(
+                tone_frequency_hz=75e6,
+                trigger_delay_s=30e-9,
+                integrate_time_s=120e-9,
+                adc_channel="CHB",
+            )
+
+        self.assertEqual(experiment.tone_frequency_hz, 75e6)
+        self.assertEqual(experiment.trigger_delay_samples, 30)
+        self.assertEqual(experiment.integrate_window_cycles, (0, 120))
+        self.assertEqual(experiment.adc_channel_name, "CHB")
+        self.assertEqual(configure.call_args.kwargs["channel"], CHANNEL_B)
+
+    def test_compiled_acquisition_is_owned_by_hardware_coordinator(self) -> None:
+        experiment = self.make_experiment(acquire_window_ns=256)
+        readout = SimpleNamespace(
+            name="ro",
+            length_s=100e-9,
+            integrate_time_s=80e-9,
+            demod_frequency_hz=50e6,
+            adc_channel="CHA",
+        )
+        compiled = SimpleNamespace(
+            readout=readout,
+            trigger_delay_s=30e-9,
+            number_of_sequence_steps=2,
+            axes={"gain": np.array([0.1, 0.2])},
+            point_coordinates=({"gain": 0.1}, {"gain": 0.2}),
+        )
+        experiment._uploaded_compiled = compiled
+        experiment.last_sequence_records_volts = np.ones((3, 2, 256))
+        experiment.last_sequence_shot_iq = np.ones(
+            (3, 2, 237),
+            dtype=complex,
+        )
+
+        with (
+            patch.object(experiment, "configure_experiment") as configure,
+            patch.object(
+                experiment,
+                "acquire_sequence_traces",
+                return_value=(
+                    np.arange(256) / 1e9,
+                    np.ones((2, 256)),
+                    np.arange(237) / 1e9,
+                    np.ones((2, 237), dtype=complex),
+                ),
+            ) as acquire,
+        ):
+            result = experiment.acquire_compiled_experiment(
+                compiled,
+                n_average=3,
+            )
+
+        configure.assert_called_once_with(
+            tone_frequency_hz=50e6,
+            trigger_delay_s=30e-9,
+            integrate_time_s=80e-9,
+            adc_channel="CHA",
+        )
+        acquire.assert_called_once_with(
+            number_of_steps=2,
+            number_of_averages=3,
+            filter_type="boxcar",
+        )
+        self.assertEqual(result.raw.shape, (3, 2, 256))
+        self.assertEqual(result.shots().shape, (3, 2))
+
     def test_process_multiplex_integrate(self) -> None:
-        from alazar import AlazarProcessor
+        from QAWG.alazar import AlazarProcessor
         processor = AlazarProcessor(sample_rate_hz=1e9)
         time_s = np.arange(1000) / 1e9
         # Construct raw signal with 50 MHz and 150 MHz components
@@ -292,7 +418,7 @@ class AWGAlazarTests(unittest.TestCase):
         self.assertAlmostEqual(avg_q1.imag, 0.0, places=3)
 
     def test_apply_butterworth_lpf(self) -> None:
-        from alazar import AlazarProcessor
+        from QAWG.alazar import AlazarProcessor
         processor = AlazarProcessor(sample_rate_hz=1e9)
         time_s = np.arange(1000) / 1e9
         baseband = np.exp(1j * 2 * np.pi * 10e6 * time_s) + np.exp(1j * 2 * np.pi * 200e6 * time_s)

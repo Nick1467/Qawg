@@ -1,12 +1,12 @@
 # AWG5208 + ATS9371 統一介面
 
-`awg_alazar.py` 用 `AWGAlazar` 保存兩台儀器的 sampling rate，並負責
+`QAWG/awg_alazar.py` 用 `AWGAlazar` 保存兩台儀器的 sampling rate，並負責
 AWG 播放、Alazar trigger、DMA acquisition 和 IQ demodulation。
 
 ## 建立連線
 
 ```python
-from awg_alazar import AWGAlazar
+from QAWG.awg_alazar import AWGAlazar
 
 experiment = AWGAlazar.connect(
     "TCPIP0::192.168.10.171::inst0::INSTR",
@@ -16,7 +16,7 @@ experiment = AWGAlazar.connect(
     trigger_delay_s=100e-9,
     num_averages=1000,
     acquire_window_ns=1200,
-    integrate_window_ns=(100, 1100),
+    integrate_time_s=1e-6,
     adc_channel="CHA",
     moving_average_time_s=20e-9,
 )

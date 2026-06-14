@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -13,6 +14,7 @@ from QAWG import (
     us,
 )
 from QAWG import PowerRabiProgram, T1Program
+from QAWG.awg5200 import trigger_channel_for
 
 
 class DelayProgram(ExperimentProgram):
@@ -23,6 +25,8 @@ class DelayProgram(ExperimentProgram):
             adc_channel="CHA",
             length=1 * us,
             demod_freq=50e6,
+            waveform_ch=3,
+            integrate_time=800 * ns,
         )
         self.delay = self.add_sweep(
             "delay",
@@ -41,7 +45,7 @@ class DelayProgram(ExperimentProgram):
     def _body(self, cfg):
         self.delay_auto(self.delay)
         self.play("pulse")
-        self.trigger("ro", at=0)
+        self.trigger("ro", trigger_delay=30 * ns)
 
 
 class ExperimentCompilerTests(unittest.TestCase):
@@ -49,6 +53,7 @@ class ExperimentCompilerTests(unittest.TestCase):
         compiled = DelayProgram({}).compile(sample_rate_hz=2.5e9)
 
         self.assertEqual(compiled.number_of_sequence_steps, 6)
+        self.assertEqual(compiled.trigger_delay_s, 30 * ns)
         np.testing.assert_allclose(
             compiled.axis("delay") / ns,
             [0, 40, 80, 120, 160, 200],
@@ -56,9 +61,46 @@ class ExperimentCompilerTests(unittest.TestCase):
         self.assertEqual(compiled.preview(3).shape[0], 6)
 
         starts = []
-        for trace in compiled.preview(3):
+        for step_index, trace in enumerate(compiled.preview(3)):
             starts.append(np.flatnonzero(np.abs(trace) > 1e-5)[0])
+            _, expected_marker = trigger_channel_for(trace)
+            np.testing.assert_array_equal(
+                compiled.marker_waveforms[step_index],
+                expected_marker,
+            )
         np.testing.assert_array_equal(np.diff(starts), 100)
+
+    def test_trigger_delay_cannot_change_between_sequence_steps(self) -> None:
+        class SweptTriggerDelayProgram(ExperimentProgram):
+            def _initialize(self, cfg):
+                self.declare_gen("drive", ch=3)
+                self.declare_readout(
+                    "ro",
+                    adc_channel="CHA",
+                    length=1 * us,
+                    demod_freq=50e6,
+                    waveform_ch=3,
+                )
+                self.delay = self.add_sweep(
+                    "trigger_delay",
+                    LinearSweep(0, 40 * ns, 2),
+                )
+                self.add_pulse(
+                    "pulse",
+                    gen="drive",
+                    style="gaussian",
+                    length=100 * ns,
+                    sigma=15 * ns,
+                    frequency=50e6,
+                    gain=0.02,
+                )
+
+            def _body(self, cfg):
+                self.play("pulse")
+                self.trigger("ro", trigger_delay=self.delay)
+
+        with self.assertRaisesRegex(ValueError, "same.*sequence step"):
+            SweptTriggerDelayProgram({}).compile(sample_rate_hz=2.5e9)
 
     def test_power_rabi_changes_waveform_gain_per_step(self) -> None:
         cfg = {
@@ -140,43 +182,73 @@ class ExperimentCompilerTests(unittest.TestCase):
         compiled = DelayProgram({}).compile(sample_rate_hz=2.5e9)
 
         class FakeHardware:
-            alazar_sample_rate_hz = 1e9
-
-            def acquire_sequence_traces(
+            def acquire_compiled_experiment(
                 self,
-                number_of_steps,
-                number_of_averages,
+                plan,
+                n_average,
+                *,
                 filter_type,
             ):
                 self.called_with = (
-                    number_of_steps,
-                    number_of_averages,
+                    plan,
+                    n_average,
                     filter_type,
                 )
-                self.last_sequence_records_volts = np.ones(
-                    (number_of_averages, number_of_steps, 128)
-                )
-                self.last_sequence_shot_iq = np.ones(
-                    (number_of_averages, number_of_steps, 100),
-                    dtype=complex,
-                )
-                return (
-                    np.arange(128) / 1e9,
-                    np.ones((number_of_steps, 128)),
-                    np.arange(100) / 1e9,
-                    np.ones((number_of_steps, 100), dtype=complex),
+                return ExperimentResult(
+                    axes=plan.axes,
+                    point_coordinates=plan.point_coordinates,
+                    raw=np.ones((n_average, plan.number_of_sequence_steps, 128)),
+                    iq_traces=np.ones(
+                        (n_average, plan.number_of_sequence_steps, 100),
+                        dtype=complex,
+                    ),
+                    iq_shots=np.ones(
+                        (n_average, plan.number_of_sequence_steps),
+                        dtype=complex,
+                    ),
+                    raw_time_s=np.arange(128) / 1e9,
+                    iq_time_s=np.arange(100) / 1e9,
                 )
 
         hardware = FakeHardware()
-        compiled._hardware = hardware
-        compiled._uploaded_hardware_id = id(hardware)
+        compiled.bind(hardware)
 
         result = compiled.acquire(n_average=7)
 
-        self.assertEqual(hardware.called_with, (6, 7, "boxcar"))
+        self.assertIs(hardware.called_with[0], compiled)
+        self.assertEqual(hardware.called_with[1:], (7, "boxcar"))
         self.assertEqual(result.raw.shape, (7, 6, 128))
         self.assertEqual(result.shots("ro").shape, (7, 6))
         self.assertEqual(result.trace_average("ro").shape, (6, 128))
+
+    def test_only_one_ro_readout_is_supported(self) -> None:
+        class InvalidReadoutProgram(ExperimentProgram):
+            def _initialize(self, cfg):
+                self.declare_readout(
+                    "other",
+                    adc_channel="CHA",
+                    length=1 * us,
+                    demod_freq=50e6,
+                    marker_length=40 * ns,
+                )
+
+            def _body(self, cfg):
+                pass
+
+        with self.assertRaisesRegex(ValueError, "only readout 'ro'"):
+            InvalidReadoutProgram({})
+
+    def test_compile_checks_hardware_acquisition_window(self) -> None:
+        hardware = SimpleNamespace(
+            awg_sample_rate_hz=2.5e9,
+            acquire_window_ns=500,
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "integration window exceeds",
+        ):
+            DelayProgram({}).compile(hardware=hardware)
 
 
 if __name__ == "__main__":

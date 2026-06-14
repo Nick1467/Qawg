@@ -27,7 +27,7 @@ Example using a LAN VISA resource:
 ```python
 import numpy as np
 
-from awg5200 import AWG5208
+from QAWG.awg5200 import AWG5208
 
 sample_rate = 2.5e9
 number_of_samples = 25_000

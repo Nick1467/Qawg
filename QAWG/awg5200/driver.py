@@ -18,7 +18,7 @@ from .timeline import (
     align_channels,
     channel_names,
 )
-from .waveforms import make_wfmx, trigger_channel_for
+from .waveforms import make_wfmx, modulate_envelope, trigger_channel_for
 
 CHANNEL_COUNT = 8
 MAX_SAMPLE_RATE_HZ = 2.5e9
@@ -368,13 +368,12 @@ class AWG5208:
             raise ValueError("waveform_array cannot be empty")
         if clear_before_upload:
             self.clear_all()
-        if fc == 0:
-            waveform = envelope.copy()
-        else:
-            time_s = np.arange(envelope.size, dtype=np.float64) / self._sample_rate_hz
-            waveform = envelope * np.sin(
-                2.0 * np.pi * fc * time_s + phase_radians
-            )
+        waveform = modulate_envelope(
+            envelope,
+            self._sample_rate_hz,
+            fc,
+            phase_radians,
+        )
         waveform_name = self._upload_waveform_data(
             name=name or f"ch{ch}_{fc / 1e6:g}MHz",
             waveform_volts=waveform,
