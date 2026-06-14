@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
 
@@ -9,7 +10,14 @@ import numpy as np
 import numpy.typing as npt
 
 from .transport import ScpiTransport, open_visa_transport
-from .timeline import Parallel, Timeline, Waveform, align_channels, channel_names
+from .timeline import (
+    Parallel,
+    Timeline,
+    Waveform,
+    align_channel_envelopes,
+    align_channels,
+    channel_names,
+)
 from .waveforms import make_wfmx, trigger_channel_for
 
 CHANNEL_COUNT = 8
@@ -73,7 +81,9 @@ class AWG5208:
         self._transport = transport
         self.waveform_directory = waveform_directory.rstrip("\\")
         self._waveforms: dict[str, npt.NDArray[np.float64]] = {}
+        self._activity_waveforms: dict[str, npt.NDArray[np.float64]] = {}
         self._assigned_waveforms: dict[int, str] = {}
+        self._sequences: dict[str, dict[int, tuple[str, ...]]] = {}
         self._sample_rate_hz: float | None = None
 
     @classmethod
@@ -204,7 +214,9 @@ class AWG5208:
         self.write("WLISt:WAVeform:DELete ALL")
         self.wait_until_complete()
         self._waveforms.clear()
+        self._activity_waveforms.clear()
         self._assigned_waveforms.clear()
+        self._sequences.clear()
 
     def set_current_directory(self, path: str) -> None:
         self.write(f"MMEMory:CDIRectory {quote_scpi(path)}")
@@ -242,6 +254,97 @@ class AWG5208:
         self._waveforms[waveform_name] = waveform.copy()
         return waveform_name
 
+    def upload_waveform_asset(
+        self,
+        name: str,
+        waveform_volts: npt.ArrayLike,
+        amplitude_vpp: float = 0.5,
+        markers: tuple[npt.ArrayLike, ...] = (),
+        overwrite: bool = True,
+    ) -> str:
+        """Upload one WFMX asset without assigning it to a channel."""
+        return self._upload_waveform_data(
+            name=name,
+            waveform_volts=waveform_volts,
+            amplitude_vpp=amplitude_vpp,
+            markers=markers,
+            overwrite=overwrite,
+        )
+
+    def create_sequence(
+        self,
+        name: str,
+        tracks: dict[int, Sequence[str]],
+        *,
+        repetitions: int | Sequence[int] = 1,
+        goto_step: int | None = 1,
+        enabled: bool = True,
+    ) -> str:
+        """Create and assign a sequence list from uploaded waveform assets."""
+        if not tracks:
+            raise ValueError("tracks cannot be empty")
+        for channel in tracks:
+            validate_channel(channel)
+
+        track_waveforms = {
+            channel: tuple(waveform_names)
+            for channel, waveform_names in tracks.items()
+        }
+        step_counts = {len(waveform_names) for waveform_names in track_waveforms.values()}
+        if len(step_counts) != 1 or not step_counts or next(iter(step_counts)) < 1:
+            raise ValueError("all tracks must contain the same positive number of steps")
+        step_count = next(iter(step_counts))
+
+        if isinstance(repetitions, int):
+            repeat_counts = (repetitions,) * step_count
+        else:
+            repeat_counts = tuple(int(value) for value in repetitions)
+        if len(repeat_counts) != step_count or any(value < 1 for value in repeat_counts):
+            raise ValueError("repetitions must provide one positive count per step")
+        if goto_step is not None and not 1 <= goto_step <= step_count:
+            raise ValueError("goto_step must refer to an existing sequence step")
+        for waveform_names in track_waveforms.values():
+            for waveform_name in waveform_names:
+                if waveform_name not in self._waveforms:
+                    raise ValueError(
+                        f"waveform {waveform_name!r} was not uploaded by this driver session"
+                    )
+
+        sequence_name = name.removesuffix(".seqx")
+        quote_scpi(sequence_name)
+        ordered_channels = tuple(sorted(track_waveforms))
+        self.write(
+            f"SLISt:SEQuence:NEW {quote_scpi(sequence_name)},"
+            f"{step_count},{len(ordered_channels)}"
+        )
+        for step_index in range(1, step_count + 1):
+            for track_index, channel in enumerate(ordered_channels, start=1):
+                waveform_name = track_waveforms[channel][step_index - 1]
+                self.write(
+                    f"SLISt:SEQuence:STEP{step_index}:TASSet{track_index}:"
+                    f"WAVeform {quote_scpi(sequence_name)},"
+                    f"{quote_scpi(waveform_name)}"
+                )
+            self.write(
+                f"SLISt:SEQuence:STEP{step_index}:RCOunt "
+                f"{quote_scpi(sequence_name)},{repeat_counts[step_index - 1]}"
+            )
+        if goto_step is not None:
+            self.write(
+                f"SLISt:SEQuence:STEP{step_count}:GOTO "
+                f"{quote_scpi(sequence_name)},{goto_step}"
+            )
+
+        for track_index, channel in enumerate(ordered_channels, start=1):
+            self.write(
+                f"SOURce{channel}:CASSet:SEQuence "
+                f"{quote_scpi(sequence_name)},{track_index}"
+            )
+            self.set_output(channel, enabled)
+        self.wait_until_complete()
+        self._sequences[sequence_name] = track_waveforms
+        return sequence_name
+
     def upload_waveform(
         self,
         waveform_array: npt.ArrayLike,
@@ -277,6 +380,7 @@ class AWG5208:
             waveform_volts=waveform,
             amplitude_vpp=amplitude_vpp,
         )
+        self._activity_waveforms[waveform_name] = envelope.copy()
         self.set_channel_resolution(ch, 16)
         self.prepare_channel(
             channel=ch,
@@ -303,6 +407,11 @@ class AWG5208:
             self._sample_rate_hz,
             total_duration_s=total_duration_s,
         )
+        channel_envelopes = align_channel_envelopes(
+            timeline,
+            self._sample_rate_hz,
+            total_duration_s=total_duration_s,
+        )
         explicit_names = channel_names(timeline)
         if clear_before_upload:
             self.clear_all()
@@ -321,6 +430,9 @@ class AWG5208:
                 )
             except ValueError as exc:
                 raise ValueError(f"Channel {channel}: {exc}") from exc
+            self._activity_waveforms[waveform_name] = channel_envelopes[
+                channel
+            ].copy()
             self.set_channel_resolution(channel, 16)
             self.prepare_channel(
                 channel,
@@ -348,6 +460,7 @@ class AWG5208:
         threshold_ratio: float = 1e-3,
         padding_samples: int = 0,
         amplitude_vpp: float = 0.5,
+        envelope_waveform: npt.ArrayLike | None = None,
     ) -> str:
         """Create a marker channel aligned to the waveform on another channel."""
         validate_channel(waveform_ch)
@@ -362,8 +475,20 @@ class AWG5208:
             raise ValueError(
                 "The assigned waveform was not uploaded by this driver session"
             )
+        ref_wave = (
+            np.asarray(envelope_waveform, dtype=np.float64).reshape(-1)
+            if envelope_waveform is not None
+            else self._activity_waveforms.get(
+                waveform_name,
+                self._waveforms[waveform_name],
+            )
+        )
+        if ref_wave.size != self._waveforms[waveform_name].size:
+            raise ValueError(
+                "envelope_waveform must match the assigned waveform length"
+            )
         zero_waveform, active_marker = trigger_channel_for(
-            self._waveforms[waveform_name],
+            ref_wave,
             threshold_ratio=threshold_ratio,
             padding_samples=padding_samples,
         )
@@ -382,6 +507,7 @@ class AWG5208:
             amplitude_vpp=amplitude_vpp,
             markers=markers,
         )
+        self._activity_waveforms[trigger_name] = ref_wave.copy()
         self.set_channel_resolution(marker_ch, 16 - marker_number)
         self.set_marker_levels(
             marker_ch,

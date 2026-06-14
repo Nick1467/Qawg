@@ -9,6 +9,13 @@ The package separates instrument state from waveform calculations:
 Multi-channel timing, `delay`, `delay_auto`, and `parallel` examples are in
 [`TIMELINE_TUTORIAL.md`](TIMELINE_TUTORIAL.md).
 
+The cause and fix for discontinuous IQ rotation during carrier phase sweeps
+are documented in
+[`PHASE_SWEEP_DEBUG.md`](PHASE_SWEEP_DEBUG.md).
+
+The recommended AWG sequence-list architecture for T1 measurements is in
+[`SEQUENCE_T1_DESIGN.md`](SEQUENCE_T1_DESIGN.md).
+
 Install hardware communication support:
 
 ```powershell

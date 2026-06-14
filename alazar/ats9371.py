@@ -36,7 +36,7 @@ from .constants import (
     TRIG_EXTERNAL,
     TRIGGER_SLOPE_POSITIVE,
 )
-from .demodulation import dispersive_demodulate
+from .demodulation import _dispersive_demodulate
 
 MEM_COMMIT = 0x1000
 MEM_RELEASE = 0x8000
@@ -71,6 +71,20 @@ class AcquisitionConfig:
     input_range_volts: float = 0.4
     timeout_ms: int = 5000
     channel: int = CHANNEL_A
+
+    def __post_init__(self) -> None:
+        alignment = SAMPLES_PER_RECORD_ALIGNMENT
+        min_samples = MIN_SAMPLES_PER_RECORD
+        
+        raw_samples = self.samples_per_record
+        rounded = int(round(raw_samples / alignment)) * alignment
+        if rounded < min_samples:
+            rounded = min_samples
+            
+        if rounded != raw_samples:
+            print(f"INFO: Aligned samples_per_record from {raw_samples} to {rounded}")
+            
+        object.__setattr__(self, "samples_per_record", rounded)
 
     @property
     def records_per_acquisition(self) -> int:
@@ -222,10 +236,10 @@ def configure_ats9371(
     board: BoardInfo,
     trigger: TriggerConfig = TriggerConfig(),
     use_external_10mhz_reference: bool = False,
+    channel: int = CHANNEL_A,
 ) -> None:
     configure_clock(api, board.handle, use_external_10mhz_reference)
-    configure_channel(api, board.handle, CHANNEL_A)
-    configure_channel(api, board.handle, CHANNEL_B)
+    configure_channel(api, board.handle, channel)
     configure_external_trigger(api, board.handle, trigger)
 
 
@@ -407,7 +421,7 @@ def demodulate_tone(
     sample_rate_hz: float,
     tone_frequency_hz: float,
 ) -> npt.NDArray[np.complex128]:
-    return dispersive_demodulate(
+    return _dispersive_demodulate(
         records_volts, sample_rate_hz, tone_frequency_hz
     )
 

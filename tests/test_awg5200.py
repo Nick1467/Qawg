@@ -8,6 +8,7 @@ import numpy as np
 from awg5200 import (
     AWG5208,
     TriggerConfig,
+    align_channel_envelopes,
     align_channels,
     delay,
     delay_auto,
@@ -125,6 +126,21 @@ class WaveformTests(unittest.TestCase):
         self.assertTrue(np.all(rendered[3][:1000] == 0))
         self.assertTrue(np.all(rendered[3][1000:1500] == 1))
 
+    def test_aligned_envelope_is_independent_of_carrier_phase(self) -> None:
+        envelope = np.hanning(200)
+        phase_zero = delay(1e-6) / waveform(
+            envelope, fc=50e6, ch=3, phase_radians=0.0
+        )
+        phase_quadrature = delay(1e-6) / waveform(
+            envelope, fc=50e6, ch=3, phase_radians=np.pi / 2
+        )
+
+        zero = align_channel_envelopes(phase_zero, 1e9)[3]
+        quadrature = align_channel_envelopes(phase_quadrature, 1e9)[3]
+
+        np.testing.assert_array_equal(zero, quadrature)
+        np.testing.assert_array_equal(zero[1000:1200], envelope)
+
     def test_delay_auto_is_relative_to_previous_end(self) -> None:
         first = waveform(np.ones(100), fc=0, ch=2)
         second = waveform(np.ones(50), fc=0, ch=3)
@@ -237,6 +253,7 @@ class DriverTests(unittest.TestCase):
         self.assertIn("WLISt:WAVeform:DELete ALL", self.transport.commands)
         self.assertEqual(self.transport.commands[-1], "*OPC?")
         self.assertEqual(self.awg._waveforms, {})
+        self.assertEqual(self.awg._activity_waveforms, {})
         self.assertEqual(self.awg._assigned_waveforms, {})
 
     def test_upload_and_assign(self) -> None:
@@ -268,6 +285,52 @@ class DriverTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "set_sample_rate"):
             self.awg.upload_waveform(np.zeros(2400), fc=50e6, ch=3)
 
+    def test_create_sequence_assigns_tracks_and_loops(self) -> None:
+        self.awg._waveforms.update(
+            {
+                "marker_100ns": np.zeros(3750),
+                "marker_200ns": np.zeros(3750),
+                "readout_100ns": np.zeros(3750),
+                "readout_200ns": np.zeros(3750),
+            }
+        )
+
+        name = self.awg.create_sequence(
+            "length_sweep",
+            {
+                1: ["marker_100ns", "marker_200ns"],
+                3: ["readout_100ns", "readout_200ns"],
+            },
+        )
+
+        self.assertEqual(name, "length_sweep")
+        self.assertIn(
+            'SLISt:SEQuence:NEW "length_sweep",2,2',
+            self.transport.commands,
+        )
+        self.assertIn(
+            'SLISt:SEQuence:STEP1:TASSet1:WAVeform '
+            '"length_sweep","marker_100ns"',
+            self.transport.commands,
+        )
+        self.assertIn(
+            'SLISt:SEQuence:STEP2:TASSet2:WAVeform '
+            '"length_sweep","readout_200ns"',
+            self.transport.commands,
+        )
+        self.assertIn(
+            'SLISt:SEQuence:STEP2:GOTO "length_sweep",1',
+            self.transport.commands,
+        )
+        self.assertIn(
+            'SOURce1:CASSet:SEQuence "length_sweep",1',
+            self.transport.commands,
+        )
+        self.assertIn(
+            'SOURce3:CASSet:SEQuence "length_sweep",2',
+            self.transport.commands,
+        )
+
     def test_upload_modulates_envelope_using_sample_rate(self) -> None:
         self.awg.set_sample_rate(2.5e9)
         envelope = np.full(2400, 0.2)
@@ -281,6 +344,10 @@ class DriverTests(unittest.TestCase):
             2 * np.pi * 50e6 * np.arange(2400) / 2.5e9
         )
         np.testing.assert_allclose(self.awg._waveforms[name], expected, atol=1e-13)
+        np.testing.assert_array_equal(
+            self.awg._activity_waveforms[name],
+            envelope,
+        )
         self.assertIn("SOURce3:DAC:RESolution 16", self.transport.commands)
 
     def test_upload_fc_zero_preserves_envelope(self) -> None:
@@ -340,6 +407,10 @@ class DriverTests(unittest.TestCase):
             self.awg._waveforms["experiment_ch2"].size,
             self.awg._waveforms["experiment_ch3"].size,
         )
+        np.testing.assert_allclose(
+            self.awg._activity_waveforms["experiment_ch3"][50:2450],
+            0.1,
+        )
         self.assertEqual(
             self.transport.commands.count("WLISt:WAVeform:DELete ALL"),
             1,
@@ -364,6 +435,12 @@ class DriverTests(unittest.TestCase):
         too_large = waveform(np.full(2400, 0.3), fc=0, ch=4)
         with self.assertRaisesRegex(ValueError, r"Channel 4: waveform peak 0.3 V"):
             self.awg.upload_timeline(too_large, amplitude_vpp={4: 0.5})
+
+    def test_waveform_gain(self) -> None:
+        raw_envelope = np.ones(100)
+        wf = waveform(raw_envelope, fc=10e6, ch=3, gain=0.5)
+        np.testing.assert_allclose(wf.envelope, 0.5)
+        self.assertEqual(wf.gain, 0.5)
 
     def test_rejects_invalid_channel(self) -> None:
         with self.assertRaises(ValueError):

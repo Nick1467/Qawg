@@ -31,7 +31,7 @@ def digital_downconvert(
     return 2.0 * records * reference
 
 
-def integrate_iq_window(
+def _integrate_iq_window(
     baseband: npt.NDArray[np.complex128],
     start_sample: int = 0,
     stop_sample: int | None = None,
@@ -46,7 +46,7 @@ def integrate_iq_window(
     return np.mean(values[:, start_sample:stop], axis=1)
 
 
-def dispersive_demodulate(
+def _dispersive_demodulate(
     records_volts: npt.NDArray[np.float64],
     sample_rate_hz: float,
     intermediate_frequency_hz: float,
@@ -61,16 +61,16 @@ def dispersive_demodulate(
         intermediate_frequency_hz,
         reference_phase_radians,
     )
-    return integrate_iq_window(baseband, start_sample, stop_sample)
+    return _integrate_iq_window(baseband, start_sample, stop_sample)
 
 
-def seconds_to_samples(duration_s: float, sample_rate_hz: float) -> int:
+def _seconds_to_samples(duration_s: float, sample_rate_hz: float) -> int:
     if duration_s < 0:
         raise ValueError("duration_s cannot be negative")
     return int(round(duration_s * sample_rate_hz))
 
 
-def dispersive_demodulate_seconds(
+def _dispersive_demodulate_seconds(
     records_volts: npt.NDArray[np.float64],
     sample_rate_hz: float,
     intermediate_frequency_hz: float,
@@ -81,11 +81,11 @@ def dispersive_demodulate_seconds(
     """Return one IQ point per record using a window specified in seconds."""
     if integration_time_s <= 0:
         raise ValueError("integration_time_s must be positive")
-    start_sample = seconds_to_samples(integration_delay_s, sample_rate_hz)
-    window_samples = seconds_to_samples(integration_time_s, sample_rate_hz)
+    start_sample = _seconds_to_samples(integration_delay_s, sample_rate_hz)
+    window_samples = _seconds_to_samples(integration_time_s, sample_rate_hz)
     if window_samples < 1:
         raise ValueError("integration_time_s is shorter than one sample")
-    return dispersive_demodulate(
+    return _dispersive_demodulate(
         records_volts,
         sample_rate_hz,
         intermediate_frequency_hz,
@@ -95,40 +95,26 @@ def dispersive_demodulate_seconds(
     )
 
 
-from scipy.ndimage import gaussian_filter1d
-
-# def moving_average_iq(
-#     baseband: npt.NDArray[np.complex128],
-#     window_samples: int,
-# ) -> npt.NDArray[np.complex128]:
-#     """Low-pass a complex IQ trace with a valid boxcar moving average."""
-#     values = np.asarray(baseband, dtype=np.complex128)
-#     if values.ndim != 2:
-#         raise ValueError("baseband must have shape (number_of_records, samples)")
-#     if not 1 <= window_samples <= values.shape[1]:
-#         raise ValueError("window_samples must fit inside each record")
-
-#     padded = np.pad(values, ((0, 0), (1, 0)), mode="constant")
-#     cumulative = np.cumsum(padded, axis=1)
-#     window_sums = cumulative[:, window_samples:] - cumulative[:, :-window_samples]
-#     return window_sums / window_samples
 
 
-def moving_average_iq(
+
+
+
+def _moving_average_iq(
     baseband: npt.NDArray[np.complex128],
-    sigma_samples: float,
+    window_samples: int,
 ) -> npt.NDArray[np.complex128]:
-    """使用高斯濾波器替代傳統矩形移動平均，獲得極平滑的基頻包絡."""
+    """Low-pass a complex IQ trace with a valid boxcar moving average."""
     values = np.asarray(baseband, dtype=np.complex128)
     if values.ndim != 2:
         raise ValueError("baseband must have shape (number_of_records, samples)")
+    if not 1 <= window_samples <= values.shape[1]:
+        raise ValueError("window_samples must fit inside each record")
 
-    # 對時間軸 (axis=1) 進行高斯平滑
-    # sigma_samples 代表高斯標準差的點數，通常設為 (預期視窗點數 / 4)
-    smooth_real = gaussian_filter1d(values.real, sigma=sigma_samples, axis=1)
-    smooth_imag = gaussian_filter1d(values.imag, sigma=sigma_samples, axis=1)
-
-    return smooth_real + 1j * smooth_imag
+    padded = np.pad(values, ((0, 0), (1, 0)), mode="constant")
+    cumulative = np.cumsum(padded, axis=1)
+    window_sums = cumulative[:, window_samples:] - cumulative[:, :-window_samples]
+    return window_sums / window_samples
 
 
 def moving_average_time_axis(
@@ -144,24 +130,24 @@ def moving_average_time_axis(
     return first_center + np.arange(output_length) / sample_rate_hz
 
 
-def emission_demodulate(
+def acquire_decimate(
     records_volts: npt.NDArray[np.float64],
     sample_rate_hz: float,
     intermediate_frequency_hz: float,
     window_samples: int,
     reference_phase_radians: float = 0.0,
 ) -> npt.NDArray[np.complex128]:
-    """Return a time-resolved, moving-averaged complex emission envelope."""
+    """Return a time-resolved, moving-averaged complex envelope."""
     baseband = digital_downconvert(
         records_volts,
         sample_rate_hz,
         intermediate_frequency_hz,
         reference_phase_radians,
     )
-    return moving_average_iq(baseband, window_samples)
+    return _moving_average_iq(baseband, window_samples)
 
 
-def average_shots(
+def acquire(
     shot_values: npt.NDArray[np.complex128],
 ) -> npt.NDArray[np.complex128] | np.complex128:
     """Average the first axis, which represents repeated AWG triggers."""
@@ -260,7 +246,7 @@ def recover_coherent_envelope(
         phase_start_sample,
         phase_stop_sample,
     )
-    filtered = moving_average_iq(aligned, window_samples)
+    filtered = _moving_average_iq(aligned, window_samples)
     coherent_average = np.mean(filtered, axis=0)
     magnitude_average = np.mean(np.abs(filtered), axis=0)
     return filtered, coherent_average, magnitude_average, shot_phases
@@ -292,7 +278,7 @@ def recover_clock_referenced_envelope(
         sample_rate_hz,
         intermediate_frequency_hz,
     )
-    filtered = moving_average_iq(baseband, window_samples)
+    filtered = _moving_average_iq(baseband, window_samples)
     coherent_average = np.mean(filtered, axis=0)
     rms_envelope = np.sqrt(np.mean(np.abs(filtered) ** 2, axis=0))
     return filtered, coherent_average, rms_envelope

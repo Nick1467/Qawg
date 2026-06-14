@@ -84,8 +84,8 @@ The saved `dispersive_iq` array contains one complex IQ point per trigger, and
 integration window is configured in seconds with `--integration-delay-s` and
 `--integration-time-s`.
 
-The saved `emission_iq` array contains one time-resolved complex envelope per
-trigger. `emission_iq_average` is the final trace averaged over
+The saved `acquire_decimate_iq` array contains one time-resolved complex envelope per
+trigger. `acquire_decimate_iq_average` is the final trace averaged over
 `num-averages`. Processing first mixes 100 MHz to complex baseband, then
 applies a boxcar moving average. The default window is 50 samples, or 50 ns
 at 1 GS/s:

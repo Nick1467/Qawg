@@ -18,6 +18,7 @@ class Waveform:
     ch: int
     phase_radians: float = 0.0
     name: str | None = None
+    gain: float = 1.0
 
     def __truediv__(self, other: object) -> "Timeline":
         return Timeline((self,)) / other
@@ -56,8 +57,9 @@ def waveform(
     ch: int,
     phase_radians: float = 0.0,
     name: str | None = None,
+    gain: float = 1.0,
 ) -> Waveform:
-    envelope = np.asarray(waveform_array, dtype=np.float64).reshape(-1)
+    envelope = np.asarray(waveform_array, dtype=np.float64).reshape(-1) * gain
     if envelope.size < 1:
         raise ValueError("waveform_array cannot be empty")
     if not np.all(np.isfinite(envelope)):
@@ -66,7 +68,7 @@ def waveform(
         raise ValueError("ch must be between 1 and 8")
     if fc < 0:
         raise ValueError("fc cannot be negative")
-    return Waveform(envelope.copy(), fc, ch, phase_radians, name)
+    return Waveform(envelope.copy(), fc, ch, phase_radians, name, gain)
 
 
 def parallel(*waveforms: Waveform) -> Parallel:
@@ -140,13 +142,13 @@ def _scheduled_waveforms(
     return scheduled
 
 
-def align_channels(
+def _render_channels(
     timeline: Timeline | Waveform | Parallel,
     sample_rate_hz: float,
-    total_duration_s: float = 5e-6,
-    minimum_samples: int = MIN_WAVEFORM_SAMPLES,
+    total_duration_s: float,
+    minimum_samples: int,
+    modulate: bool,
 ) -> dict[int, FloatArray]:
-    """Render all scheduled channels onto one sample-aligned time axis."""
     if total_duration_s <= 0:
         raise ValueError("total_duration_s must be positive")
     if isinstance(timeline, (Waveform, Parallel)):
@@ -167,7 +169,7 @@ def align_channels(
     }
 
     for pulse, start in scheduled:
-        if pulse.fc == 0:
+        if not modulate or pulse.fc == 0:
             carrier = np.ones(pulse.envelope.size, dtype=np.float64)
         else:
             local_time = (
@@ -180,6 +182,38 @@ def align_channels(
             pulse.envelope * carrier
         )
     return channels
+
+
+def align_channels(
+    timeline: Timeline | Waveform | Parallel,
+    sample_rate_hz: float,
+    total_duration_s: float = 5e-6,
+    minimum_samples: int = MIN_WAVEFORM_SAMPLES,
+) -> dict[int, FloatArray]:
+    """Render modulated channels onto one sample-aligned time axis."""
+    return _render_channels(
+        timeline,
+        sample_rate_hz,
+        total_duration_s,
+        minimum_samples,
+        modulate=True,
+    )
+
+
+def align_channel_envelopes(
+    timeline: Timeline | Waveform | Parallel,
+    sample_rate_hz: float,
+    total_duration_s: float = 5e-6,
+    minimum_samples: int = MIN_WAVEFORM_SAMPLES,
+) -> dict[int, FloatArray]:
+    """Render unmodulated envelopes on the waveform time axis."""
+    return _render_channels(
+        timeline,
+        sample_rate_hz,
+        total_duration_s,
+        minimum_samples,
+        modulate=False,
+    )
 
 
 def channel_names(timeline: Timeline | Waveform | Parallel) -> dict[int, str]:
