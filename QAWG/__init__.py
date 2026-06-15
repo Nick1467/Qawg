@@ -19,6 +19,15 @@ from .examples import (
 )
 from .awg_alazar import AWGAlazar
 from .awg5200 import AWG5208
+from .tomography import (
+    calibrate_iq_samples,
+    coherent_density_matrix,
+    heterodyne_ml_density_matrix,
+    normalize_heterodyne_reference,
+    project_temporal_mode,
+    temporal_mode_weights,
+    wigner_function,
+)
 
 __all__ = [
     "CompiledExperiment",
@@ -34,6 +43,13 @@ __all__ = [
     "SweepRef",
     "T1Program",
     "ValuesSweep",
+    "calibrate_iq_samples",
+    "coherent_density_matrix",
+    "heterodyne_ml_density_matrix",
+    "normalize_heterodyne_reference",
     "ns",
+    "project_temporal_mode",
+    "temporal_mode_weights",
     "us",
+    "wigner_function",
 ]
