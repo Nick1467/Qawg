@@ -39,7 +39,7 @@ def declare_standard_hardware(
 
 
 class PulseProbeSpectroscopyProgram(ExperimentProgram):
-    def _initialize(self, cfg: dict[str, Any]) -> None:
+    def init(self, cfg: dict[str, Any]) -> None:
         declare_standard_hardware(self, cfg)
         frequency = self.add_sweep(
             "frequency",
@@ -68,7 +68,7 @@ class PulseProbeSpectroscopyProgram(ExperimentProgram):
             readout=True,
         )
 
-    def _body(self, cfg: dict[str, Any]) -> None:
+    def body(self, cfg: dict[str, Any]) -> None:
         self.play("qubit_pulse", at=0)
         self.play("res_pulse", at=cfg.get("res_start", 0))
         self.trigger(
@@ -78,7 +78,7 @@ class PulseProbeSpectroscopyProgram(ExperimentProgram):
 
 
 class PowerRabiProgram(ExperimentProgram):
-    def _initialize(self, cfg: dict[str, Any]) -> None:
+    def init(self, cfg: dict[str, Any]) -> None:
         declare_standard_hardware(self, cfg)
         gain = self.add_sweep(
             "gain",
@@ -107,7 +107,7 @@ class PowerRabiProgram(ExperimentProgram):
             readout=True,
         )
 
-    def _body(self, cfg: dict[str, Any]) -> None:
+    def body(self, cfg: dict[str, Any]) -> None:
         self.play("qubit_pulse")
         self.delay_auto(cfg.get("qubit_to_readout", 40 * ns))
         self.play("res_pulse")
@@ -118,7 +118,7 @@ class PowerRabiProgram(ExperimentProgram):
 
 
 class T1Program(ExperimentProgram):
-    def _initialize(self, cfg: dict[str, Any]) -> None:
+    def init(self, cfg: dict[str, Any]) -> None:
         declare_standard_hardware(self, cfg)
         delay = self.add_sweep(
             "delay",
@@ -148,7 +148,7 @@ class T1Program(ExperimentProgram):
             readout=True,
         )
 
-    def _body(self, cfg: dict[str, Any]) -> None:
+    def body(self, cfg: dict[str, Any]) -> None:
         self.play("pi_pulse")
         self.delay_auto(self.delay_sweep)
         self.play("res_pulse")
@@ -159,7 +159,7 @@ class T1Program(ExperimentProgram):
 
 
 class SingleShotProgram(ExperimentProgram):
-    def _initialize(self, cfg: dict[str, Any]) -> None:
+    def init(self, cfg: dict[str, Any]) -> None:
         declare_standard_hardware(self, cfg)
         state = self.add_sweep(
             "state",
@@ -185,7 +185,7 @@ class SingleShotProgram(ExperimentProgram):
             readout=True,
         )
 
-    def _body(self, cfg: dict[str, Any]) -> None:
+    def body(self, cfg: dict[str, Any]) -> None:
         self.play("pi_pulse", when=("state", "e"))
         self.play("res_pulse", at=cfg["pi_len"] + cfg.get("readout_delay", 40 * ns))
         self.trigger(
@@ -197,7 +197,7 @@ class SingleShotProgram(ExperimentProgram):
 class CavityRingdownProgram(ExperimentProgram):
     """Fill a cavity, then acquire its free ring-down after the drive stops."""
 
-    def _initialize(self, cfg: dict[str, Any]) -> None:
+    def init(self, cfg: dict[str, Any]) -> None:
         self.declare_gen(
             "cavity_drive",
             ch=cfg.get("awg_ch", 3),
@@ -226,7 +226,7 @@ class CavityRingdownProgram(ExperimentProgram):
             gain=cfg["drive_gain"],
         )
 
-    def _body(self, cfg: dict[str, Any]) -> None:
+    def body(self, cfg: dict[str, Any]) -> None:
         self.play("cavity_fill", at=0)
         self.trigger(
             "ro",

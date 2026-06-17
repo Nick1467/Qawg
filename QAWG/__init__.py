@@ -20,7 +20,12 @@ from .examples import (
 )
 from .awg_alazar import AWGAlazar
 from .awg5200 import AWG5208
-from .analysis import WindowAnalysis, calculate_window
+from .analysis import (
+    PhaseShotDiagnostics,
+    WindowAnalysis,
+    calculate_window,
+    diagnose_phase_shots,
+)
 from .tomography import (
     calibrate_iq_samples,
     coherent_density_matrix,
@@ -46,11 +51,13 @@ __all__ = [
     "SweepRef",
     "T1Program",
     "ValuesSweep",
+    "PhaseShotDiagnostics",
     "WindowAnalysis",
     "calibrate_iq_samples",
     "calculate_window",
     "coherent_density_matrix",
     "heterodyne_ml_density_matrix",
+    "diagnose_phase_shots",
     "normalize_heterodyne_reference",
     "ns",
     "project_temporal_mode",

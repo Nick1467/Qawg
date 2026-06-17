@@ -26,18 +26,15 @@ notebook["metadata"] = {
 notebook["cells"] = [
     markdown(
         """
-# QAWG experiment compiler demo
+# QAWG hardware demo
 
-This notebook demonstrates the unified host-side compiler without requiring
-hardware for the preview sections.
+Workflow:
 
-Included examples:
-
-1. Pulse-probe spectroscopy frequency sequence.
-2. Power Rabi gain sequence.
-3. T1 delay sequence.
-4. Single-shot ground/excited sequence.
-5. Optional AWG5208 + ATS9371 acquisition using `n_average`.
+1. TOF calibration with a 1.5 us acquisition window, 0.6 us pulse, 1.0 us
+   integration window, and initial trigger delay 0.
+2. Resonator spectroscopy near 5.9 GHz by sweeping the SGS100A frequency.
+3. Single-shot acquisition with readout gain 0.002.
+4. Heterodyne tomography: estimate photon number and plot a Wigner function.
 """
     ),
     code(
@@ -46,802 +43,479 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from QAWG import (
-    MHz,
-    PowerRabiProgram,
-    PulseProbeSpectroscopyProgram,
+    AWGAlazar,
+    ExperimentProgram,
+    ExperimentResult,
+    LinearSweep,
     SingleShotProgram,
-    T1Program,
+    ValuesSweep,
+    calculate_window,
     ns,
     us,
 )
-"""
-    ),
-    markdown("## Shared configuration"),
-    code(
-        """
-SAMPLE_RATE_HZ = 2.5e9
-
-base_cfg = {
-    "qubit_ch": 4,
-    "res_ch": 3,
-    "marker_ch": 1,
-    "adc_channel": "CHA",
-    "f_ge": 100 * MHz,
-    "f_res": 50 * MHz,
-    "res_len": 1 * us,
-    "res_gain": 0.02,
-    "ro_len": 1 * us,
-}
-"""
-    ),
-    markdown("## Pulse-probe spectroscopy"),
-    code(
-        """
-spectroscopy_cfg = {
-    **base_cfg,
-    "frequency_start": 80 * MHz,
-    "frequency_stop": 120 * MHz,
-    "steps": 21,
-    "probe_len": 500 * ns,
-    "qubit_gain": 0.02,
-    "trig_time": 0,
-}
-
-spectroscopy = PulseProbeSpectroscopyProgram(spectroscopy_cfg)
-spectroscopy_compiled = spectroscopy.compile(
-    sample_rate_hz=SAMPLE_RATE_HZ,
-)
-
-print("Sequence steps:", spectroscopy_compiled.number_of_sequence_steps)
-print(
-    "Frequency axis (MHz):",
-    spectroscopy_compiled.axis("frequency") / MHz,
-)
-"""
-    ),
-    code(
-        """
-time_ns = (
-    np.arange(spectroscopy_compiled.preview(4).shape[1])
-    / SAMPLE_RATE_HZ
-    / ns
-)
-
-plt.figure(figsize=(12, 5))
-for index in [0, 10, 20]:
-    plt.plot(
-        time_ns,
-        spectroscopy_compiled.preview(4)[index] * 1e3,
-        label=(
-            f"{spectroscopy_compiled.axis('frequency')[index] / MHz:.1f} MHz"
-        ),
-    )
-plt.xlim(0, 600)
-plt.xlabel("Time (ns)")
-plt.ylabel("Qubit waveform (mV)")
-plt.title("Spectroscopy sequence assets")
-plt.grid(True, alpha=0.3)
-plt.legend()
-plt.show()
-"""
-    ),
-    markdown("## Power Rabi: sequence list changes gain"),
-    code(
-        """
-power_rabi_cfg = {
-    **base_cfg,
-    "gain_start": 0.0,
-    "gain_stop": 0.08,
-    "steps": 9,
-    "qubit_len": 100 * ns,
-    "qubit_sigma": 15 * ns,
-}
-
-power_rabi = PowerRabiProgram(power_rabi_cfg)
-power_rabi_compiled = power_rabi.compile(
-    sample_rate_hz=SAMPLE_RATE_HZ,
-)
-
-gain = power_rabi_compiled.axis("gain")
-peak = np.max(np.abs(power_rabi_compiled.preview(4)), axis=1)
-
-plt.figure(figsize=(7, 4))
-plt.plot(gain, peak, "o-")
-plt.xlabel("Programmed gain (V)")
-plt.ylabel("Compiled waveform peak (V)")
-plt.title("Power Rabi compile-time gain sweep")
-plt.grid(True, alpha=0.3)
-plt.show()
-"""
-    ),
-    markdown("## T1: delay_auto sweep"),
-    code(
-        """
-t1_cfg = {
-    **base_cfg,
-    "delay_start": 0,
-    "delay_stop": 2 * us,
-    "steps": 11,
-    "pi_len": 100 * ns,
-    "pi_sigma": 15 * ns,
-    "pi_gain": 0.04,
-}
-
-t1 = T1Program(t1_cfg)
-t1_compiled = t1.compile(sample_rate_hz=SAMPLE_RATE_HZ)
-
-print("Delay axis (us):", t1_compiled.axis("delay") / us)
-print("Fixed step duration (us):", t1_compiled.step_duration_s / us)
-"""
-    ),
-    code(
-        """
-time_ns = np.arange(t1_compiled.preview(3).shape[1]) / SAMPLE_RATE_HZ / ns
-
-plt.figure(figsize=(12, 5))
-for index in [0, 5, 10]:
-    plt.plot(
-        time_ns,
-        t1_compiled.preview(3)[index] * 1e3,
-        label=f"delay={t1_compiled.axis('delay')[index] / us:.1f} us",
-    )
-plt.xlabel("Sequence step time (ns)")
-plt.ylabel("Readout waveform (mV)")
-plt.title("T1 readout moves while every sequence step remains fixed length")
-plt.grid(True, alpha=0.3)
-plt.legend()
-plt.show()
-"""
-    ),
-    markdown("## Single-shot ground/excited sequence"),
-    code(
-        """
-single_shot_cfg = {
-    **base_cfg,
-    "pi_len": 100 * ns,
-    "pi_sigma": 15 * ns,
-    "pi_gain": 0.04,
-}
-
-single_shot = SingleShotProgram(single_shot_cfg)
-single_shot_compiled = single_shot.compile(
-    sample_rate_hz=SAMPLE_RATE_HZ,
-)
-
-print("State axis:", single_shot_compiled.axis("state"))
-print(
-    "Ground qubit peak:",
-    np.max(np.abs(single_shot_compiled.preview(4)[0])),
-)
-print(
-    "Excited qubit peak:",
-    np.max(np.abs(single_shot_compiled.preview(4)[1])),
-)
-"""
-    ),
-    markdown(
-        """
-## SGS100A microwave LO
-
-Connect to the SGS100A at `192.168.10.90`, set the microwave carrier to
-6 GHz at 0 dBm, route the carrier to the rear `REF/LO OUT` connector, and
-enable the main RF output.
-
-Run this cell before the hardware acquisition sections.
-"""
-    ),
-    code(
-        """
 from QAWG.instrument import RohdeSchwarzSGS100A
-
+from QAWG.tomography import (
+    heterodyne_ml_density_matrix,
+    normalize_heterodyne_reference,
+    project_temporal_mode,
+    temporal_mode_weights,
+    wigner_function,
+)
+"""
+    ),
+    markdown("## Shared hardware settings"),
+    code(
+        """
+AWG_RESOURCE = "TCPIP0::192.168.10.171::inst0::INSTR"
 SGS100A_ADDRESS = "192.168.10.90"
-LO_FREQUENCY_HZ = 6e9
-LO_POWER_DBM = 0.0
 
+AWG_SAMPLE_RATE_HZ = 2.5e9
+ALAZAR_SAMPLE_RATE_HZ = 1e9
+ACQUIRE_WINDOW = 1.5 * us
+INTEGRATE_WINDOW = 1.0 * us
+
+AWG_CH = 1
+MARKER_CH = 1
+ADC_CHANNEL = "CHB"
+CHANNEL_AMPLITUDE_VPP = 0.5
+IF_FREQUENCY_HZ = 50e6
+
+TOF_N_AVERAGE = 1000
+SPECTROSCOPY_N_AVERAGE = 1000
+SINGLE_SHOT_N_AVERAGE = 10000
+TOMOGRAPHY_N_AVERAGE = 20000
+"""
+    ),
+    code(
+        """
 sgs = RohdeSchwarzSGS100A(SGS100A_ADDRESS)
-sgs.frequency = LO_FREQUENCY_HZ
-sgs.power = LO_POWER_DBM
+sgs.frequency = 5.9e9
+sgs.power = 0.0
 sgs.IQ_state = "on"
 sgs.pulsemod_state = "off"
 sgs.configure_lo_output(True, mode="LO")
 sgs.on()
 
+experiment = AWGAlazar.connect(
+    AWG_RESOURCE,
+    awg_sample_rate_hz=AWG_SAMPLE_RATE_HZ,
+    alazar_sample_rate_hz=ALAZAR_SAMPLE_RATE_HZ,
+    acquire_window_s=ACQUIRE_WINDOW,
+    trigger_slope="rising",
+    trigger_level=140,
+    tone_frequency_hz=IF_FREQUENCY_HZ,
+    integrate_window_ns=(0.0, INTEGRATE_WINDOW / ns),
+    adc_channel=ADC_CHANNEL,
+    moving_average_time_s=20e-9,
+    baseline_time_s=100e-9,
+)
+
 print("SGS100A:", sgs.idn())
-print(f"Frequency: {sgs.frequency / 1e9:.9f} GHz")
-print(f"Power: {sgs.power:.3f} dBm")
-print("Main RF output:", sgs.status)
-print("External IQ modulation:", sgs.IQ_state)
-print("Pulse modulation:", sgs.pulsemod_state)
-print("Rear REF/LO output:", sgs.ref_lo_output)
-print("Instrument error:", sgs.check_error())
+print(f"SGS frequency: {sgs.frequency / 1e9:.9f} GHz")
+print(f"SGS power: {sgs.power:.3f} dBm")
+print("AWG/Alazar connected")
 """
     ),
-    markdown(
-        """
-## Hardware TOF loopback test
-
-Connect the selected AWG analog output to the SGS100A I input and route the
-SGS100A RF output through the mixer to the selected ATS9371 input.
-
-The Gaussian-square pulse and Alazar marker are both scheduled at `t=0`.
-Therefore the measured pulse arrival time is the total loopback time of flight
-through the AWG output path, cable, and ATS acquisition path.
-
-The analog I waveform and marker may share the same AWG channel. The marker
-uses marker bits embedded in that channel's waveform data.
-
-Run the following three cells in order.
-"""
-    ),
+    markdown("## 1. TOF calibration"),
     code(
         """
-from QAWG import ExperimentProgram, ns, us
-
-
 class TOFProgram(ExperimentProgram):
-    def _initialize(self, cfg):
+    def init(self, cfg):
         self.declare_gen(
-            "loopback",
+            "readout",
             ch=cfg["awg_ch"],
             amplitude_vpp=cfg["channel_amplitude_vpp"],
         )
         self.declare_readout(
             "ro",
             adc_channel=cfg["adc_channel"],
-            length=cfg["acquire_length"],
-            demod_freq=cfg["frequency"],
+            length=cfg["integrate_window"],
+            demod_freq=cfg["if_frequency_hz"],
             waveform_ch=cfg["awg_ch"],
             marker_channel=cfg["marker_ch"],
-            marker_padding=cfg["marker_padding"],
-            integrate_time=cfg["integrate_time"],
+            marker_padding=0.0,
+            integrate_time=cfg["integrate_window"],
         )
         self.add_pulse(
             "tof_pulse",
-            gen="loopback",
+            gen="readout",
             style="gaussian_square",
             length=cfg["pulse_length"],
             edge_sigma=cfg["edge_sigma"],
-            frequency=cfg["frequency"],
-            gain=cfg["pulse_gain"],
+            frequency=cfg["if_frequency_hz"],
+            gain=cfg["readout_gain"],
             readout=True,
         )
 
-    def _body(self, cfg):
-        # The compiler shifts this tagged readout pulse when pre-padding is needed.
+    def body(self, cfg):
         self.play("tof_pulse", at=0)
-        self.trigger(
-            "ro",
-            trigger_delay=cfg["trigger_delay"],
-        )
+        self.trigger("ro", trigger_delay=cfg["trigger_delay"])
+
+
+def result_from_decimate(compiled, decimated, *, initial_trigger_delay_s):
+    marker_windows_s = np.zeros(
+        (compiled.number_of_sequence_steps, 2),
+        dtype=np.float64,
+    )
+    for step_index, marker in enumerate(compiled.marker_waveforms):
+        active = np.flatnonzero(marker)
+        if active.size:
+            marker_windows_s[step_index] = (
+                active[0] / compiled.sample_rate_hz,
+                (active[-1] + 1) / compiled.sample_rate_hz,
+            )
+
+    iq_traces = decimated["downconverted_traces"]
+    return ExperimentResult(
+        axes={name: values.copy() for name, values in compiled.axes.items()},
+        point_coordinates=compiled.point_coordinates,
+        raw=decimated["raw_traces"],
+        iq_traces=iq_traces,
+        iq_shots=np.mean(iq_traces, axis=2),
+        raw_time_s=decimated["raw_time_s"],
+        iq_time_s=decimated["downconverted_time_s"],
+        readout_name=compiled.readout.name,
+        initial_trigger_delay_s=initial_trigger_delay_s,
+        readout_windows_s=compiled.readout_windows_s.copy(),
+        marker_windows_s=marker_windows_s,
+        acquire_window_s=ACQUIRE_WINDOW,
+        remove_dc_offset=getattr(compiled, "remove_dc_offset", False),
+    )
 """
     ),
     code(
         """
-from QAWG import AWGAlazar, MHz, ns, us
-
-# Physical wiring:
-# AWG channel 1 analog output -> SGS100A I input
-# SGS100A RF output -> mixer RF input -> ATS9371 CHB input
-# SGS100A rear LO output -> mixer LO input
-# AWG channel 1 marker 1 -> ATS9371 external trigger
 tof_cfg = {
-    "awg_ch": 1,
-    "marker_ch": 1,
-    "adc_channel": "CHB",
-    "channel_amplitude_vpp": 0.5,
-    "frequency": 50 * MHz,
-    "pulse_length": 600 * ns,
-    "marker_padding": 500 * ns,
+    "awg_ch": AWG_CH,
+    "marker_ch": MARKER_CH,
+    "adc_channel": ADC_CHANNEL,
+    "channel_amplitude_vpp": CHANNEL_AMPLITUDE_VPP,
+    "if_frequency_hz": IF_FREQUENCY_HZ,
+    "pulse_length": 0.6 * us,
+    "integrate_window": 1.0 * us,
+    "trigger_delay": 0.0,
     "edge_sigma": 20 * ns,
-    "pulse_gain": 0.02,
-    "acquire_length": 1.5 * us,
-    # Initial ATS post-trigger delay. Adjust after measuring the residual TOF.
-    "trigger_delay": 500 * ns,
-    "integrate_time": 1 * us,
+    "readout_gain": 0.02,
 }
 
-TOF_N_AVERAGE = 1000
-HARDWARE_ACQUIRE_WINDOW = 1.5 * us
-
-experiment = AWGAlazar.connect(
-    "TCPIP0::192.168.10.171::inst0::INSTR",
-    awg_sample_rate_hz=2.5e9,
-    alazar_sample_rate_hz=1e9,
-    acquire_window_s=HARDWARE_ACQUIRE_WINDOW,
-    trigger_slope="rising",
-    trigger_level=140,
+tof_compiled = TOFProgram(tof_cfg, final_delay_s=1 * us).compile(
+    hardware=experiment,
 )
-
-tof_program = TOFProgram(tof_cfg, final_delay_s=1 * us)
-tof_program.REMOVE_DC_OFFSET = True
-tof_compiled = tof_program.compile(hardware=experiment)
-
-if tof_cfg["awg_ch"] == tof_cfg["marker_ch"]:
-    print(
-        "Analog I and trigger marker share AWG "
-        f"CH{tof_cfg['awg_ch']} (supported)."
-    )
-
-marker_samples = np.flatnonzero(tof_compiled.marker_waveforms[0])
-marker_start_ns = marker_samples[0] / experiment.awg_sample_rate_hz / ns
-marker_stop_ns = (marker_samples[-1] + 1) / experiment.awg_sample_rate_hz / ns
-
-print("Sequence steps:", tof_compiled.number_of_sequence_steps)
-print("AWG step duration (us):", tof_compiled.step_duration_s / us)
-print(f"Analog channel: CH{tof_cfg['awg_ch']}")
-print(f"Trigger marker: CH{tof_cfg['marker_ch']} Marker 1")
-print(f"Compiled marker window: {marker_start_ns:.3f} to {marker_stop_ns:.3f} ns")
-print("Initial ATS post-trigger delay:", tof_cfg["trigger_delay"] / ns, "ns")
-"""
-    ),
-    code(
-        """
-from QAWG import calculate_window
-
-tof_result = tof_compiled.acquire(n_average=TOF_N_AVERAGE)
-window = calculate_window(tof_result)
-"""
-    ),
-    markdown(
-        """
-## Hardware Gaussian-square length sweep
-
-This sequence changes the AWG Gaussian-square pulse length from 100 ns to
-600 ns. The ATS trigger remains fixed at `t=0`.
-
-`compiled.acquire()` keeps every decimated IQ trace with shape
-`(n_average, sequence_step, time)`. Calling `iq_trace_average("ro")` averages
-matching records trace by trace, so the changing pulse width remains visible.
-"""
-    ),
-    code(
-        """
-from QAWG import ExperimentProgram, LinearSweep, ns
-
-
-class LengthSweepProgram(ExperimentProgram):
-    def _initialize(self, cfg):
-        self.declare_gen(
-            "loopback",
-            ch=cfg["awg_ch"],
-            amplitude_vpp=cfg["channel_amplitude_vpp"],
-        )
-        self.declare_readout(
-            "ro",
-            adc_channel=cfg["adc_channel"],
-            length=cfg["acquire_length"],
-            demod_freq=cfg["frequency"],
-            waveform_ch=cfg["awg_ch"],
-            marker_channel=cfg["marker_ch"],
-            marker_padding=cfg["marker_padding"],
-            integrate_time=cfg["integrate_time"],
-        )
-        pulse_length = self.add_sweep(
-            "pulse_length",
-            LinearSweep(
-                cfg["length_start"],
-                cfg["length_stop"],
-                cfg["length_steps"],
-            ),
-        )
-        self.add_pulse(
-            "length_sweep_pulse",
-            gen="loopback",
-            style="gaussian_square",
-            length=pulse_length,
-            edge_sigma=cfg["edge_sigma"],
-            frequency=cfg["frequency"],
-            gain=cfg["pulse_gain"],
-            readout=True,
-        )
-
-    def _body(self, cfg):
-        self.play("length_sweep_pulse", at=0)
-        self.trigger(
-            "ro",
-            trigger_delay=cfg["trigger_delay"],
-        )
-"""
-    ),
-    code(
-        """
-length_sweep_cfg = {
-    **tof_cfg,
-    "length_start": 100 * ns,
-    "length_stop": 600 * ns,
-    "length_steps": 6,
-    "edge_sigma": 15 * ns,
-}
-LENGTH_SWEEP_N_AVERAGE = 500
-
-length_program = LengthSweepProgram(
-    length_sweep_cfg,
-    final_delay_s=1 * us,
-)
-length_compiled = length_program.compile(hardware=experiment)
-length_result = length_compiled.acquire(
-    n_average=LENGTH_SWEEP_N_AVERAGE,
+tof_decimated = tof_compiled.acquire_decimate(
+    n_average=TOF_N_AVERAGE,
     filter_type="boxcar",
 )
-
-length_ns = length_result.axis("pulse_length") / ns
-length_iq_mv = np.abs(length_result.iq_trace_average("ro")) * 1e3
-length_time_ns = length_result.iq_time_s / ns
-
-print("Pulse lengths (ns):", length_ns)
-print("All decimated IQ traces:", length_result.iq_traces.shape)
-print("Trace-by-trace average:", length_iq_mv.shape)
-
-fig, axes = plt.subplots(1, 2, figsize=(15, 5))
-for index, pulse_length_ns in enumerate(length_ns):
-    axes[0].plot(
-        length_time_ns,
-        length_iq_mv[index],
-        label=f"{pulse_length_ns:.0f} ns",
-    )
-axes[0].set_xlabel("Time after ATS trigger (ns)")
-axes[0].set_ylabel("|IQ| (mV)")
-axes[0].set_title("Decimated IQ: Gaussian-square length sweep")
-axes[0].grid(True, alpha=0.3)
-axes[0].legend(title="AWG length")
-
-image = axes[1].imshow(
-    length_iq_mv,
-    aspect="auto",
-    origin="lower",
-    extent=[
-        length_time_ns[0],
-        length_time_ns[-1],
-        length_ns[0],
-        length_ns[-1],
-    ],
+tof_result = result_from_decimate(
+    tof_compiled,
+    tof_decimated,
+    initial_trigger_delay_s=tof_cfg["trigger_delay"],
 )
-axes[1].set_xlabel("Time after ATS trigger (ns)")
-axes[1].set_ylabel("AWG pulse length (ns)")
-axes[1].set_title("Trace-by-trace averaged |IQ|")
-fig.colorbar(image, ax=axes[1], label="|IQ| (mV)")
+window = calculate_window(
+    tof_result,
+    trigger_lead_s=20e-9,
+    integration_guard_s=20e-9,
+)
 
-plt.tight_layout()
-plt.show()
+SUGGESTED_TRIGGER_DELAY = window.suggested_trigger_delay_s
+SUGGESTED_INTEGRATE_WINDOW = (
+    0.0,
+    tof_cfg["integrate_window"],
+)
+
+print(f"Suggested trigger delay: {SUGGESTED_TRIGGER_DELAY / ns:.3f} ns")
+print(
+    "Suggested integration window:",
+    f"{SUGGESTED_INTEGRATE_WINDOW[0] / ns:.3f} to",
+    f"{SUGGESTED_INTEGRATE_WINDOW[1] / ns:.3f} ns",
+)
 """
     ),
-    markdown(
-        """
-## Hardware `delay_auto` sweep
-
-Every sequence step uses the same 100 ns Gaussian pulse. Only the relative
-delay before the pulse changes:
-
-```text
-delay_auto(0 ns)   / Gaussian
-delay_auto(40 ns)  / Gaussian
-...
-delay_auto(200 ns) / Gaussian
-```
-
-The ATS trigger stays at `t=0`, so the decimated traces show the waveform
-moving later inside the same acquisition window.
-"""
-    ),
+    markdown("## 2. Resonator spectroscopy near 5.9 GHz"),
     code(
         """
-class DelayAutoSweepProgram(ExperimentProgram):
-    def _initialize(self, cfg):
-        self.declare_gen(
-            "loopback",
-            ch=cfg["awg_ch"],
-            amplitude_vpp=cfg["channel_amplitude_vpp"],
-        )
-        self.declare_readout(
-            "ro",
-            adc_channel=cfg["adc_channel"],
-            length=cfg["acquire_length"],
-            demod_freq=cfg["frequency"],
-            marker_channel=cfg["marker_ch"],
-            marker_length=cfg["marker_length"],
-            integrate_time=cfg["integrate_time"],
-        )
-        self.delay = self.add_sweep(
-            "delay",
-            LinearSweep(
-                cfg["delay_start"],
-                cfg["delay_stop"],
-                cfg["delay_steps"],
-            ),
-        )
-        self.add_pulse(
-            "delayed_gaussian",
-            gen="loopback",
-            style="gaussian",
-            length=cfg["gaussian_length"],
-            sigma=cfg["gaussian_sigma"],
-            frequency=cfg["frequency"],
-            gain=cfg["pulse_gain"],
-        )
-
-    def _body(self, cfg):
-        self.trigger(
-            "ro",
-            trigger_delay=cfg["trigger_delay"],
-        )
-        self.delay_auto(self.delay)
-        self.play("delayed_gaussian")
-"""
-    ),
-    code(
-        """
-delay_sweep_cfg = {
-    **tof_cfg,
-    "marker_length": 40 * ns,
-    # Keep acquisition fixed at the marker edge so the pulse delay remains visible.
-    "trigger_delay": 0 * ns,
-    "delay_start": 0 * ns,
-    "delay_stop": 200 * ns,
-    "delay_steps": 6,
-    "gaussian_length": 100 * ns,
-    "gaussian_sigma": 15 * ns,
-}
-DELAY_SWEEP_N_AVERAGE = 500
-
-delay_program = DelayAutoSweepProgram(
-    delay_sweep_cfg,
-    final_delay_s=1 * us,
-)
-delay_compiled = delay_program.compile(hardware=experiment)
-delay_result = delay_compiled.acquire(
-    n_average=DELAY_SWEEP_N_AVERAGE,
-    filter_type="boxcar",
-)
-
-delay_ns = delay_result.axis("delay") / ns
-delay_iq_mv = np.abs(delay_result.iq_trace_average("ro")) * 1e3
-delay_time_ns = delay_result.iq_time_s / ns
-
-print("delay_auto values (ns):", delay_ns)
-print("All decimated IQ traces:", delay_result.iq_traces.shape)
-print("Trace-by-trace average:", delay_iq_mv.shape)
-
-fig, axes = plt.subplots(1, 2, figsize=(15, 5))
-for index, delay_value_ns in enumerate(delay_ns):
-    axes[0].plot(
-        delay_time_ns,
-        delay_iq_mv[index],
-        label=f"{delay_value_ns:.0f} ns",
-    )
-axes[0].set_xlabel("Time after ATS trigger (ns)")
-axes[0].set_ylabel("|IQ| (mV)")
-axes[0].set_title("Decimated IQ: delay_auto sweep")
-axes[0].grid(True, alpha=0.3)
-axes[0].legend(title="delay_auto")
-
-image = axes[1].imshow(
-    delay_iq_mv,
-    aspect="auto",
-    origin="lower",
-    extent=[
-        delay_time_ns[0],
-        delay_time_ns[-1],
-        delay_ns[0],
-        delay_ns[-1],
-    ],
-)
-axes[1].set_xlabel("Time after ATS trigger (ns)")
-axes[1].set_ylabel("delay_auto value (ns)")
-axes[1].set_title("Identical Gaussian shifted in time")
-fig.colorbar(image, ax=axes[1], label="|IQ| (mV)")
-
-plt.tight_layout()
-plt.show()
-"""
-    ),
-    markdown(
-        """
-## Hardware single shot: 0 and 180 degree readout
-
-This sequence contains two readout steps with exactly the same waveform
-length, frequency, and amplitude. Only the carrier phase changes:
-
-```text
-step 0: readout phase =   0 degrees
-step 1: readout phase = 180 degrees
-```
-
-The waveform length equals the declared readout length. Every acquisition is
-kept as an individual shot.
-"""
-    ),
-    code(
-        """
-from QAWG import ExperimentProgram, ValuesSweep
-
-
-class PhaseSingleShotProgram(ExperimentProgram):
-    def _initialize(self, cfg):
+class ResonatorReadoutProgram(ExperimentProgram):
+    def init(self, cfg):
         self.declare_gen(
             "readout",
-            ch=cfg["readout_ch"],
+            ch=cfg["awg_ch"],
             amplitude_vpp=cfg["channel_amplitude_vpp"],
         )
         self.declare_readout(
             "ro",
             adc_channel=cfg["adc_channel"],
-            length=cfg["readout_length"],
-            demod_freq=cfg["frequency"],
-            waveform_ch=cfg["readout_ch"],
+            length=cfg["pulse_length"],
+            demod_freq=cfg["if_frequency_hz"],
+            waveform_ch=cfg["awg_ch"],
             marker_channel=cfg["marker_ch"],
-            marker_padding=cfg["marker_padding"],
-            integrate_time=cfg["readout_length"],
-        )
-        phase = self.add_sweep(
-            "phase",
-            ValuesSweep((0.0, np.pi)),
+            marker_padding=0.0,
+            integrate_time=cfg["integrate_window"],
         )
         self.add_pulse(
             "readout_pulse",
             gen="readout",
             style="const",
-            length=cfg["readout_length"],
-            frequency=cfg["frequency"],
-            phase=phase,
+            length=cfg["pulse_length"],
+            frequency=cfg["if_frequency_hz"],
             gain=cfg["readout_gain"],
             readout=True,
         )
 
-    def _body(self, cfg):
+    def body(self, cfg):
         self.play("readout_pulse", at=0)
-        self.trigger(
-            "ro",
-            trigger_delay=cfg["trigger_delay"],
-        )
+        self.trigger("ro", trigger_delay=cfg["trigger_delay"])
+
+
+readout_cfg = {
+    "awg_ch": AWG_CH,
+    "marker_ch": MARKER_CH,
+    "adc_channel": ADC_CHANNEL,
+    "channel_amplitude_vpp": CHANNEL_AMPLITUDE_VPP,
+    "if_frequency_hz": IF_FREQUENCY_HZ,
+    "pulse_length": 1.0 * us,
+    "integrate_window": 1.0 * us,
+    "trigger_delay": SUGGESTED_TRIGGER_DELAY,
+    "readout_gain": 0.02,
+}
+
+readout_compiled = ResonatorReadoutProgram(
+    readout_cfg,
+    final_delay_s=1 * us,
+).compile(hardware=experiment)
+readout_compiled.upload()
 """
     ),
     code(
         """
-phase_single_shot_cfg = {
-    "readout_ch": tof_cfg["awg_ch"],
-    "marker_ch": tof_cfg["marker_ch"],
-    "adc_channel": tof_cfg["adc_channel"],
-    "channel_amplitude_vpp": tof_cfg["channel_amplitude_vpp"],
-    "frequency": tof_cfg["frequency"],
-    "readout_length": 1 * us,
-    "readout_gain": tof_cfg["pulse_gain"],
-    "marker_padding": tof_cfg["marker_padding"],
-    "trigger_delay": tof_cfg["trigger_delay"],
-}
-SINGLE_SHOT_N_AVERAGE = 1000
+sgs_frequencies = np.linspace(5.88e9, 5.92e9, 81)
+resonator_iq = np.empty(sgs_frequencies.size, dtype=np.complex128)
 
-phase_single_shot = PhaseSingleShotProgram(
-    phase_single_shot_cfg,
+for index, frequency_hz in enumerate(sgs_frequencies):
+    sgs.frequency = float(frequency_hz)
+    result = readout_compiled.acquire(n_average=SPECTROSCOPY_N_AVERAGE)
+    resonator_iq[index] = result["integrated_iq"][0]
+    print(
+        f"{index + 1:03d}/{sgs_frequencies.size}: "
+        f"{frequency_hz / 1e9:.9f} GHz, "
+        f"|IQ|={abs(resonator_iq[index]) * 1e3:.4f} mV"
+    )
+
+resonator_freq_ghz = sgs_frequencies / 1e9
+
+fig, axes = plt.subplots(1, 2, figsize=(13, 4))
+axes[0].plot(resonator_freq_ghz, np.abs(resonator_iq) * 1e3, "o-")
+axes[0].set_xlabel("SGS frequency (GHz)")
+axes[0].set_ylabel("|IQ| (mV)")
+axes[0].set_title("Resonator spectroscopy")
+axes[0].grid(True, alpha=0.3)
+
+axes[1].plot(resonator_iq.real * 1e3, resonator_iq.imag * 1e3, "o-")
+axes[1].set_xlabel("I (mV)")
+axes[1].set_ylabel("Q (mV)")
+axes[1].set_title("IQ circle")
+axes[1].axis("equal")
+axes[1].grid(True, alpha=0.3)
+plt.tight_layout()
+plt.show()
+
+best_index = int(np.argmin(np.abs(resonator_iq)))
+RESONATOR_SGS_FREQUENCY = float(sgs_frequencies[best_index])
+sgs.frequency = RESONATOR_SGS_FREQUENCY
+print(f"Selected SGS frequency: {RESONATOR_SGS_FREQUENCY / 1e9:.9f} GHz")
+"""
+    ),
+    markdown("## 3. Single shot with readout gain 0.002"),
+    code(
+        """
+single_shot_cfg = {
+    "qubit_ch": 4,
+    "res_ch": AWG_CH,
+    "marker_ch": MARKER_CH,
+    "adc_channel": ADC_CHANNEL,
+    "qubit_amplitude_vpp": CHANNEL_AMPLITUDE_VPP,
+    "res_amplitude_vpp": CHANNEL_AMPLITUDE_VPP,
+    "f_ge": 100e6,
+    "f_res": IF_FREQUENCY_HZ,
+    "pi_len": 100 * ns,
+    "pi_sigma": 15 * ns,
+    "pi_gain": 0.04,
+    "readout_delay": 40 * ns,
+    "res_len": 1.0 * us,
+    "ro_len": 1.0 * us,
+    "res_gain": 0.002,
+    "integrate_time": 1.0 * us,
+    "trigger_delay": SUGGESTED_TRIGGER_DELAY,
+}
+
+single_shot_compiled = SingleShotProgram(
+    single_shot_cfg,
     final_delay_s=1 * us,
-)
-phase_single_shot_compiled = phase_single_shot.compile(
-    hardware=experiment,
-)
-phase_single_shot_result = phase_single_shot_compiled.acquire(
+).compile(hardware=experiment)
+single_shot_result = single_shot_compiled.acquire(
     n_average=SINGLE_SHOT_N_AVERAGE,
+)
+
+states = single_shot_result["axes"]["state"]
+shots = single_shot_result["shot_iq"]
+
+print("States:", states)
+print("Shot IQ shape:", shots.shape)
+print("Readout gain:", single_shot_cfg["res_gain"])
+
+plt.figure(figsize=(6, 6))
+for step, state in enumerate(states):
+    plt.scatter(
+        shots[:, step].real * 1e3,
+        shots[:, step].imag * 1e3,
+        s=6,
+        alpha=0.35,
+        label=str(state),
+    )
+plt.xlabel("I (mV)")
+plt.ylabel("Q (mV)")
+plt.title("Single-shot IQ, readout gain 0.002")
+plt.axis("equal")
+plt.grid(True, alpha=0.3)
+plt.legend(title="State")
+plt.show()
+"""
+    ),
+    markdown("## 4. Photon number and Wigner function"),
+    code(
+        """
+class TomographyProgram(ExperimentProgram):
+    def init(self, cfg):
+        self.declare_gen(
+            "readout",
+            ch=cfg["awg_ch"],
+            amplitude_vpp=cfg["channel_amplitude_vpp"],
+        )
+        state = self.add_sweep("state", ValuesSweep(("reference", "signal")))
+        self.state = state
+        self.declare_readout(
+            "ro",
+            adc_channel=cfg["adc_channel"],
+            length=cfg["readout_length"],
+            demod_freq=cfg["if_frequency_hz"],
+            waveform_ch=cfg["awg_ch"],
+            marker_channel=cfg["marker_ch"],
+            marker_padding=0.0,
+            integrate_time=cfg["readout_length"],
+        )
+        self.add_pulse(
+            "signal_pulse",
+            gen="readout",
+            style="const",
+            length=cfg["readout_length"],
+            frequency=cfg["if_frequency_hz"],
+            gain=cfg["signal_gain"],
+            readout=True,
+        )
+        self.add_pulse(
+            "reference_pulse",
+            gen="readout",
+            style="const",
+            length=cfg["readout_length"],
+            frequency=cfg["if_frequency_hz"],
+            gain=0.0,
+            readout=True,
+        )
+
+    def body(self, cfg):
+        self.play("reference_pulse", at=0, when=("state", "reference"))
+        self.play("signal_pulse", at=0, when=("state", "signal"))
+        self.trigger("ro", trigger_delay=cfg["trigger_delay"])
+
+
+tomography_cfg = {
+    "awg_ch": AWG_CH,
+    "marker_ch": MARKER_CH,
+    "adc_channel": ADC_CHANNEL,
+    "channel_amplitude_vpp": CHANNEL_AMPLITUDE_VPP,
+    "if_frequency_hz": IF_FREQUENCY_HZ,
+    "readout_length": 1.0 * us,
+    "trigger_delay": SUGGESTED_TRIGGER_DELAY,
+    "signal_gain": 0.002,
+}
+
+tomography_compiled = TomographyProgram(
+    tomography_cfg,
+    final_delay_s=1 * us,
+).compile(hardware=experiment)
+tomography_debug = tomography_compiled.acquire_decimate(
+    n_average=TOMOGRAPHY_N_AVERAGE,
     filter_type="boxcar",
 )
 
-phase_degrees = np.rad2deg(
-    phase_single_shot_result.axis("phase")
+iq_traces = tomography_debug["downconverted_traces"]
+iq_time_s = tomography_debug["downconverted_time_s"]
+mode_samples = int(round(tomography_cfg["readout_length"] * ALAZAR_SAMPLE_RATE_HZ))
+mode_samples = min(mode_samples, iq_traces.shape[2])
+weights = temporal_mode_weights(mode_samples, kind="boxcar")
+
+reference_samples = project_temporal_mode(iq_traces[:, 0, :], weights)
+signal_samples = project_temporal_mode(iq_traces[:, 1, :], weights)
+reference_alpha, (signal_alpha,), iq_offset, iq_scale = normalize_heterodyne_reference(
+    reference_samples,
+    signal_samples,
 )
-print("Phase steps (degrees):", phase_degrees)
-print(
-    "Raw records (shot, phase, time):",
-    phase_single_shot_result.raw.shape,
+
+rho = heterodyne_ml_density_matrix(
+    signal_alpha,
+    cutoff=8,
+    iterations=200,
+    dilution=0.5,
 )
-"""
-    ),
-    markdown(
-        """
-### Trajectory from raw downconverted data
+number = np.arange(rho.shape[0], dtype=float)
+photon_number = float(np.real(np.sum(number * np.diag(rho))))
+purity = float(np.real(np.trace(rho @ rho)))
 
-The calculation below starts from the unfiltered ADC voltage records. It
-performs complex digital downconversion and then computes the cumulative IQ
-average independently for every shot:
-
-```python
-trajectory[..., n] = mean(raw_downconverted[..., :n + 1])
-```
-
-No averaging between shots is performed before constructing the trajectories.
+print("Projected reference samples:", reference_alpha.shape)
+print("Projected signal samples:", signal_alpha.shape)
+print(f"Photon number <n>: {photon_number:.4f}")
+print(f"Purity Tr(rho^2): {purity:.4f}")
+print(f"IQ offset: {iq_offset}")
+print(f"IQ scale: {iq_scale}")
 """
     ),
     code(
         """
-raw_records = phase_single_shot_result.raw
-raw_time_s = phase_single_shot_result.raw_time_s
-frequency_hz = phase_single_shot_cfg["frequency"]
-readout_samples = int(round(
-    phase_single_shot_cfg["readout_length"]
-    * experiment.alazar_sample_rate_hz
-))
+x = np.linspace(-3.0, 3.0, 81)
+y = np.linspace(-3.0, 3.0, 81)
+W = wigner_function(rho, x, y)
 
-# ATS record length is aligned to the hardware block size. Do not integrate
-# the zero-padded tail after the physical readout waveform has ended.
-raw_records = raw_records[:, :, :readout_samples]
-raw_time_s = raw_time_s[:readout_samples]
-
-# Same convention as QAWG.alazar.digital_downconvert(), without filtering.
-digital_reference = np.exp(
-    -1j * 2 * np.pi * frequency_hz * raw_time_s
+fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+axes[0].scatter(
+    reference_alpha.real,
+    reference_alpha.imag,
+    s=3,
+    alpha=0.15,
+    label="reference",
 )
-raw_downconverted = 2.0 * raw_records * digital_reference[None, None, :]
-
-sample_count = np.arange(
-    1,
-    raw_downconverted.shape[2] + 1,
-    dtype=float,
+axes[0].scatter(
+    signal_alpha.real,
+    signal_alpha.imag,
+    s=3,
+    alpha=0.15,
+    label="signal",
 )
-trajectory = np.cumsum(raw_downconverted, axis=2)
-trajectory /= sample_count[None, None, :]
-
-integration_time_ns = sample_count / experiment.alazar_sample_rate_hz / ns
-final_iq_mv = trajectory[:, :, -1] * 1e3
-
-print(
-    "Raw downconverted IQ (shot, phase, time):",
-    raw_downconverted.shape,
-)
-print("IQ trajectory:", trajectory.shape)
-print(
-    "Trajectory integration stop:",
-    f"{integration_time_ns[-1]:.0f} ns "
-    "(physical readout length)",
-)
-
-colors = ["tab:blue", "tab:orange"]
-fig, axes = plt.subplots(1, 2, figsize=(14, 6))
-
-# Plot a readable subset of individual trajectories plus the shot mean.
-shots_to_plot = min(50, SINGLE_SHOT_N_AVERAGE)
-trajectory_mv = trajectory * 1e3
-for phase_index, phase_degree in enumerate(phase_degrees):
-    for shot_index in range(shots_to_plot):
-        axes[0].plot(
-            trajectory_mv[shot_index, phase_index].real,
-            trajectory_mv[shot_index, phase_index].imag,
-            color=colors[phase_index],
-            alpha=0.08,
-            linewidth=0.7,
-        )
-    mean_trajectory = np.mean(
-        trajectory_mv[:, phase_index],
-        axis=0,
-    )
-    axes[0].plot(
-        mean_trajectory.real,
-        mean_trajectory.imag,
-        color=colors[phase_index],
-        linewidth=2.5,
-        label=f"{phase_degree:.0f} degree mean",
-    )
-
-    axes[1].scatter(
-        final_iq_mv[:, phase_index].real,
-        final_iq_mv[:, phase_index].imag,
-        s=10,
-        alpha=0.35,
-        color=colors[phase_index],
-        label=f"{phase_degree:.0f} degrees",
-    )
-
-axes[0].set_xlabel("Cumulative I (mV)")
-axes[0].set_ylabel("Cumulative Q (mV)")
-axes[0].set_title("Single-shot IQ trajectories")
+axes[0].set_xlabel("Re(alpha)")
+axes[0].set_ylabel("Im(alpha)")
+axes[0].set_title("Normalized heterodyne samples")
 axes[0].axis("equal")
 axes[0].grid(True, alpha=0.3)
 axes[0].legend()
 
-axes[1].set_xlabel("Final I (mV)")
-axes[1].set_ylabel("Final Q (mV)")
-axes[1].set_title(
-    f"Final IQ after {integration_time_ns[-1]:.0f} ns integration"
+image = axes[1].imshow(
+    W,
+    extent=[x[0], x[-1], y[0], y[-1]],
+    origin="lower",
+    cmap="RdBu_r",
+    aspect="equal",
 )
-axes[1].axis("equal")
-axes[1].grid(True, alpha=0.3)
-axes[1].legend()
-
+axes[1].set_xlabel("Re(alpha)")
+axes[1].set_ylabel("Im(alpha)")
+axes[1].set_title(f"Wigner function, <n>={photon_number:.3f}")
+fig.colorbar(image, ax=axes[1], label="W(alpha)")
 plt.tight_layout()
 plt.show()
 """
@@ -849,7 +523,6 @@ plt.show()
     markdown("## Close hardware sessions"),
     code(
         """
-# Turn off microwave power before closing instrument sessions.
 if "sgs" in globals():
     sgs.off()
     sgs.configure_lo_output(False)

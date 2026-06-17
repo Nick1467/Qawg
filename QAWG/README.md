@@ -126,29 +126,34 @@ The only acquisition averaging parameter is `n_average`:
 result = compiled.acquire(n_average=1000)
 ```
 
-For `P` sequence points, the result keeps the unaveraged records:
+For `P` sequence points, `acquire()` returns the integrated-window IQ data:
 
 ```python
-result.raw.shape
-# (n_average, P, adc_sample)
+result["integrated_iq"].shape
+# (P,)
 
-result.iq_traces.shape
-# (n_average, P, iq_sample)
-
-result.shots("ro").shape
+result["shot_iq"].shape
 # (n_average, P)
 ```
 
-Averaging is explicit:
+Use the axis metadata to plot sweep results:
 
 ```python
-raw_average = result.trace_average("ro")
-iq_trace_average = result.iq_trace_average("ro")
-iq_average = result.iq_average("ro")
+gain = result["axes"]["gain"]
+iq = result["integrated_iq"]
 ```
 
-This is important for single-shot experiments because the compiler does not
-discard shot-level information.
+For raw acquisition-window records and time-resolved downconverted traces, use
+`acquire_decimate()` instead:
+
+```python
+debug = compiled.acquire_decimate(n_average=1000)
+raw = debug["raw_traces"]
+iq_traces = debug["downconverted_traces"]
+```
+
+This keeps the normal data path small while preserving the full trace data for
+debugging and IQ trajectory analysis.
 
 ## Basic program
 
@@ -284,8 +289,8 @@ program = PowerRabiProgram({
 compiled = program.compile(hardware=experiment)
 result = compiled.acquire(n_average=1000)
 
-gain = result.axis("gain")
-iq = result.iq_average("ro")
+gain = result["axes"]["gain"]
+iq = result["integrated_iq"]
 ```
 
 ## T1
@@ -312,8 +317,8 @@ program = T1Program({
 })
 
 result = program.compile(hardware=experiment).acquire(n_average=1000)
-delay = result.axis("delay")
-iq = result.iq_average("ro")
+delay = result["axes"]["delay"]
+iq = result["integrated_iq"]
 ```
 
 ## Single shot
@@ -327,14 +332,14 @@ from QAWG import SingleShotProgram
 compiled = SingleShotProgram(cfg).compile(hardware=experiment)
 result = compiled.acquire(n_average=10_000)
 
-states = result.axis("state")
-shots = result.shots("ro")
+states = result["axes"]["state"]
+shots = result["shot_iq"]
 
 ground = shots[:, 0]
 excited = shots[:, 1]
 ```
 
-No automatic average is performed by `shots()`.
+No automatic average is performed by `shot_iq`.
 
 ## Current limits
 

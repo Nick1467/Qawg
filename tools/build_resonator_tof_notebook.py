@@ -79,8 +79,7 @@ MARKER_CH = 1
 ADC_CHANNEL = "CHB"
 
 CHANNEL_AMPLITUDE_VPP = 0.5
-READOUT_GAIN_FRACTION = 0.02
-READOUT_GAIN = READOUT_GAIN_FRACTION * CHANNEL_AMPLITUDE_VPP / 2
+READOUT_GAIN = 0.02
 READOUT_LENGTH = 600 * ns
 EDGE_SIGMA = 20 * ns
 MARKER_PADDING = 500 * ns
@@ -101,9 +100,9 @@ WINDOW_INTEGRATION_GUARD = 20 * ns
 print(f"fc = {FC_HZ / MHz:.3f} MHz")
 print(f"Design resonator = {RESONATOR_DESIGN_HZ / 1e9:.9f} GHz")
 print(f"Initial SGS100A = {SGS_CENTER_HZ / 1e9:.9f} GHz")
-print(f"AWG channel amplitude = {CHANNEL_AMPLITUDE_VPP:.3f} Vpp")
-print(f"Readout gain fraction = {READOUT_GAIN_FRACTION:.6f}")
-print(f"Readout envelope peak = {READOUT_GAIN * 1e3:.6f} mV")
+print(f"AWG channel full scale = {CHANNEL_AMPLITUDE_VPP:.3f} V")
+print(f"Readout gain = {READOUT_GAIN:.6f}")
+print(f"Readout waveform peak = {READOUT_GAIN * CHANNEL_AMPLITUDE_VPP * 1e3:.6f} mV")
 print(
     "Initial microwave drive = "
     f"{(SGS_CENTER_HZ + SIDEBAND * FC_HZ) / 1e9:.9f} GHz"

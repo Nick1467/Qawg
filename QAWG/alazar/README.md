@@ -70,7 +70,9 @@ experiment = AWGAlazar.connect(
 自訂 DSP 或 multiplex readout 應先取得未處理 voltage records：
 
 ```python
-raw_time_s, records = experiment.acquire_records(n_average=1000)
+experiment.acquire(n_average=1000)
+records = experiment.last_records_volts
+raw_time_s = np.arange(records.shape[1]) / experiment.alazar_sample_rate_hz
 ```
 
 Shape：
@@ -83,23 +85,30 @@ records:    (n_average, adc_sample)
 ### Single-frequency integrated IQ
 
 ```python
-average_iq, baseband = experiment.acquire(n_average=1000)
+result = experiment.acquire(n_average=1000)
+average_iq = result["integrated_iq"]
+shot_iq = result["shot_iq"]
 ```
 
 Shape：
 
 ```text
 average_iq: scalar complex
-baseband:   (n_average, adc_sample)
+shot_iq:    (n_average,)
 ```
 
 ### Time-resolved IQ
 
 ```python
-iq_time_s, average_iq_trace = experiment.acquire_decimate(
+result = experiment.acquire_decimate(
     n_average=1000,
     filter_type="boxcar",
 )
+raw_time_s = result["raw_time_s"]
+records = result["raw_traces"]
+iq_time_s = result["downconverted_time_s"]
+iq_traces = result["downconverted_traces"]
+average_iq_trace = result["downconverted_average"]
 ```
 
 可用 filter：

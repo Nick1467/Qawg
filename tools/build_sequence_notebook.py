@@ -220,21 +220,20 @@ average 1: step 0, step 1, ..., step 5
 ...
 ```
 
-`acquire_sequence_traces()` reshapes that flat stream and returns one averaged
+The internal sequence acquisition helper reshapes that flat stream and returns one averaged
 raw trace and one averaged IQ trace for every pulse length.
 """
     ),
     code(
         """
-(
-    raw_time_s,
-    average_raw_traces,
-    iq_time_s,
-    average_iq_traces,
-) = experiment.acquire_sequence_traces(
+sequence_result = experiment._acquire_sequence_decimated(
     number_of_steps=len(PULSE_LENGTHS_NS),
     number_of_averages=NUM_AVERAGES,
 )
+raw_time_s = sequence_result["raw_time_s"]
+average_raw_traces = sequence_result["raw_average"]
+iq_time_s = sequence_result["downconverted_time_s"]
+average_iq_traces = sequence_result["downconverted_average"]
 
 sequence_records = experiment.last_sequence_records_volts
 sequence_shot_iq = experiment.last_sequence_shot_iq
@@ -274,7 +273,7 @@ np.testing.assert_allclose(
     trace_by_trace_average,
     average_raw_traces,
 )
-print("Trace-by-trace average matches acquire_sequence_traces().")
+print("Trace-by-trace average matches sequence acquisition.")
 """
     ),
     markdown("## Plot averaged raw ADC traces"),

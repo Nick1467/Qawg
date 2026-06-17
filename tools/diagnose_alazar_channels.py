@@ -44,7 +44,7 @@ for adc_channel in ("CHA", "CHB"):
         use_external_10mhz_reference=True,
     )
     try:
-        _, _ = experiment.acquire(100)
+        experiment.acquire(100)
         raw_codes = experiment.last_raw_codes
         records = experiment.last_records_volts
         stats = channel_statistics(records)

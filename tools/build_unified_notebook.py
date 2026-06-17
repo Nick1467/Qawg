@@ -177,17 +177,19 @@ print("AWG error:", experiment.awg.error())
         """
 ## Raw acquisition and integrated IQ
 
-`acquire()` performs one hardware acquisition. It returns:
+`acquire()` performs one hardware acquisition. It returns a dictionary:
 
-- `iq`: one point averaged over the configured integration window and shots.
-- `downconverted_iq`: full complex baseband data for every shot.
+- `integrated_iq`: one point averaged over the configured integration window and shots.
+- `shot_iq`: one integrated point per shot.
 
 The matching ADC codes and voltage records remain available on the class.
 """
     ),
     code(
         """
-iq, downconverted_iq = experiment.acquire(NUM_AVERAGES)
+integrated = experiment.acquire(NUM_AVERAGES)
+iq = integrated["integrated_iq"]
+shot_iq = integrated["shot_iq"]
 
 raw_codes = experiment.last_raw_codes
 records_volts = experiment.last_records_volts
@@ -195,7 +197,7 @@ raw_time_ns = experiment.last_time_s * 1e9
 
 print("Raw codes shape:", raw_codes.shape)
 print("Voltage records shape:", records_volts.shape)
-print("Downconverted shape:", downconverted_iq.shape)
+print("Shot IQ shape:", shot_iq.shape)
 print(f"Integrated IQ: I={iq.real * 1e3:.6f} mV, Q={iq.imag * 1e3:.6f} mV")
 print("Capture diagnostics:")
 for key, value in experiment.capture_diagnostics().items():
@@ -254,9 +256,11 @@ corresponds to the valid moving-average output.
     ),
     code(
         """
-demod_time_s, average_iq = experiment.acquire_decimate(NUM_AVERAGES)
+decimated = experiment.acquire_decimate(NUM_AVERAGES)
+demod_time_s = decimated["downconverted_time_s"]
+average_iq = decimated["downconverted_average"]
 demod_time_ns = demod_time_s * 1e9
-shot_iq_filtered = experiment.last_shot_iq
+shot_iq_filtered = decimated["downconverted_traces"]
 
 fig, axes = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
 axes[0].plot(demod_time_ns, average_iq.real * 1e3, label="I")
@@ -418,7 +422,9 @@ for phase in phases:
         phase_radians=phase,
         name=f"phase_{phase_deg:06.2f}_deg",
     )
-    phase_iq, phase_baseband = experiment.acquire(PHASE_AVERAGES)
+    phase_result = experiment.acquire(PHASE_AVERAGES)
+    phase_iq = phase_result["integrated_iq"]
+    phase_baseband = experiment.last_downconverted_iq
     phase_points.append(phase_iq)
     phase_filtered = moving_average_rows(
         phase_baseband,
@@ -514,7 +520,8 @@ upload_readout(
     peak_volts=SINGLE_SHOT_PEAK_VOLTS,
     name="single_shot_0_deg",
 )
-center_0, downconverted_0 = experiment.acquire(SINGLE_SHOT_AVERAGES)
+result_0 = experiment.acquire(SINGLE_SHOT_AVERAGES)
+center_0 = result_0["integrated_iq"]
 shots_0 = experiment.last_shot_iq.copy()
 
 upload_readout(
@@ -522,7 +529,8 @@ upload_readout(
     peak_volts=SINGLE_SHOT_PEAK_VOLTS,
     name="single_shot_180_deg",
 )
-center_180, downconverted_180 = experiment.acquire(SINGLE_SHOT_AVERAGES)
+result_180 = experiment.acquire(SINGLE_SHOT_AVERAGES)
+center_180 = result_180["integrated_iq"]
 shots_180 = experiment.last_shot_iq.copy()
 
 fig, ax = plt.subplots(figsize=(7, 7))

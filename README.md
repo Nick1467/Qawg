@@ -206,7 +206,9 @@ tones，擷取共同的 raw ATS9371 records，再分別 demodulate 每個 freque
 Multiplex averaging 使用：
 
 ```python
-raw_time_s, records = experiment.acquire_records(n_average=1000)
+result = experiment.acquire_decimate(n_average=1000)
+raw_time_s = result["raw_time_s"]
+records = result["raw_traces"]
 ```
 
 `n_average` 屬於 acquisition，不是 `AWGAlazar.connect()` 的參數。重新產生

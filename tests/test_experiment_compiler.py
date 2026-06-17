@@ -15,7 +15,7 @@ from QAWG import (
     us,
 )
 from QAWG import PowerRabiProgram, T1Program
-from QAWG.awg5200 import trigger_channel_for
+from QAWG.awg5200 import make_wfmx, trigger_channel_for
 
 
 class DelayProgram(ExperimentProgram):
@@ -50,6 +50,35 @@ class DelayProgram(ExperimentProgram):
 
 
 class ExperimentCompilerTests(unittest.TestCase):
+    def test_program_can_use_init_body_hooks(self) -> None:
+        class InitBodyProgram(ExperimentProgram):
+            def init(self, cfg):
+                self.declare_gen("drive", ch=3)
+                self.declare_readout(
+                    "ro",
+                    adc_channel="CHA",
+                    length=100 * ns,
+                    demod_freq=0,
+                    waveform_ch=3,
+                )
+                self.add_pulse(
+                    "pulse",
+                    gen="drive",
+                    style="const",
+                    length=100 * ns,
+                    frequency=0,
+                    gain=0.1,
+                )
+
+            def body(self, cfg):
+                self.play("pulse")
+                self.trigger("ro")
+
+        compiled = InitBodyProgram({}).compile(sample_rate_hz=1e9)
+
+        self.assertEqual(compiled.number_of_sequence_steps, 1)
+        self.assertIn("ro", InitBodyProgram({}).readouts)
+
     def test_cavity_ringdown_starts_acquisition_after_drive(self) -> None:
         cfg = {
             "frequency": 50e6,
@@ -98,7 +127,7 @@ class ExperimentCompilerTests(unittest.TestCase):
 
         compiled = ExponentialProgram({}).compile(sample_rate_hz=1e9)
         waveform = compiled.preview(3)[0]
-        self.assertAlmostEqual(waveform[0], 0.1)
+        self.assertAlmostEqual(waveform[0], 0.025)
         self.assertAlmostEqual(
             waveform[100] / waveform[0],
             np.exp(-0.5),
@@ -270,6 +299,59 @@ class ExperimentCompilerTests(unittest.TestCase):
         ]
         self.assertEqual(starts, [500, 600, 700])
 
+    def test_tagged_readout_can_use_fixed_marker_length(self) -> None:
+        class TaggedFixedMarkerProgram(ExperimentProgram):
+            def _initialize(self, cfg):
+                self.declare_gen("readout", ch=1)
+                self.declare_readout(
+                    "ro",
+                    adc_channel="CHA",
+                    length=500 * ns,
+                    demod_freq=0,
+                    marker_channel=1,
+                    marker_length=40 * ns,
+                    marker_padding=500 * ns,
+                )
+                delay = self.add_sweep(
+                    "delay",
+                    LinearSweep(0, 200 * ns, 3),
+                )
+                self.delay = delay
+                self.add_pulse(
+                    "readout",
+                    gen="readout",
+                    style="const",
+                    length=100 * ns,
+                    frequency=0,
+                    gain=1.0,
+                    readout=True,
+                )
+
+            def _body(self, cfg):
+                self.trigger("ro")
+                self.delay_auto(self.delay)
+                self.play("readout")
+
+        compiled = TaggedFixedMarkerProgram({}).compile(
+            sample_rate_hz=1e9
+        )
+        starts = [
+            np.flatnonzero(np.abs(trace) > 0)[0]
+            for trace in compiled.preview(1)
+        ]
+        marker_stops = [
+            np.flatnonzero(marker)[-1] + 1
+            for marker in compiled.marker_waveforms
+        ]
+
+        self.assertEqual(compiled.trigger_delay_s, 0.0)
+        self.assertEqual(starts, [0, 100, 200])
+        self.assertEqual(marker_stops, [40, 40, 40])
+        np.testing.assert_allclose(
+            compiled.readout_windows_s,
+            np.tile([0.0, 500 * ns], (3, 1)),
+        )
+
     def test_trigger_delay_cannot_change_between_sequence_steps(self) -> None:
         class SweptTriggerDelayProgram(ExperimentProgram):
             def _initialize(self, cfg):
@@ -351,8 +433,38 @@ class ExperimentCompilerTests(unittest.TestCase):
         waveform_values = compiled.preview(3)[0, :100]
 
         self.assertEqual(waveform_values[0], 0.0)
-        self.assertAlmostEqual(waveform_values[20], 0.02, places=12)
-        self.assertLessEqual(np.max(np.abs(waveform_values)), 0.02)
+        self.assertAlmostEqual(waveform_values[20], 0.005, places=12)
+        self.assertLessEqual(np.max(np.abs(waveform_values)), 0.005)
+
+    def test_gain_one_uses_half_declared_awg_vpp_as_peak(self) -> None:
+        class FullScaleGainProgram(ExperimentProgram):
+            def _initialize(self, cfg):
+                self.declare_gen("drive", ch=3, amplitude_vpp=0.5)
+                self.declare_readout(
+                    "ro",
+                    adc_channel="CHA",
+                    length=1 * us,
+                    demod_freq=0,
+                    waveform_ch=3,
+                )
+                self.add_pulse(
+                    "pulse",
+                    gen="drive",
+                    style="const",
+                    length=1 * us,
+                    frequency=0,
+                    gain=1.0,
+                )
+
+            def _body(self, cfg):
+                self.play("pulse")
+                self.trigger("ro")
+
+        compiled = FullScaleGainProgram({}).compile(sample_rate_hz=2.5e9)
+        waveform = compiled.preview(3)[0]
+
+        self.assertAlmostEqual(np.max(np.abs(waveform)), 0.25)
+        make_wfmx(waveform, amplitude_vpp=0.5)
 
     def test_cosine_square_requires_edge_length(self) -> None:
         class MissingEdgeProgram(ExperimentProgram):
@@ -453,21 +565,18 @@ class ExperimentCompilerTests(unittest.TestCase):
                     n_average,
                     filter_type,
                 )
-                return ExperimentResult(
-                    axes=plan.axes,
-                    point_coordinates=plan.point_coordinates,
-                    raw=np.ones((n_average, plan.number_of_sequence_steps, 128)),
-                    iq_traces=np.ones(
-                        (n_average, plan.number_of_sequence_steps, 100),
+                return {
+                    "integrated_iq": np.ones(
+                        plan.number_of_sequence_steps,
                         dtype=complex,
                     ),
-                    iq_shots=np.ones(
+                    "shot_iq": np.ones(
                         (n_average, plan.number_of_sequence_steps),
                         dtype=complex,
                     ),
-                    raw_time_s=np.arange(128) / 1e9,
-                    iq_time_s=np.arange(100) / 1e9,
-                )
+                    "axes": plan.axes,
+                    "point_coordinates": plan.point_coordinates,
+                }
 
         hardware = FakeHardware()
         compiled.bind(hardware)
@@ -476,9 +585,9 @@ class ExperimentCompilerTests(unittest.TestCase):
 
         self.assertIs(hardware.called_with[0], compiled)
         self.assertEqual(hardware.called_with[1:], (7, "boxcar"))
-        self.assertEqual(result.raw.shape, (7, 6, 128))
-        self.assertEqual(result.shots("ro").shape, (7, 6))
-        self.assertEqual(result.trace_average("ro").shape, (6, 128))
+        self.assertEqual(result["integrated_iq"].shape, (6,))
+        self.assertEqual(result["shot_iq"].shape, (7, 6))
+        self.assertNotIn("raw_traces", result)
 
     def test_only_one_ro_readout_is_supported(self) -> None:
         class InvalidReadoutProgram(ExperimentProgram):

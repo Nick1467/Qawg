@@ -294,15 +294,14 @@ average 1: delay 0, 40, 80, 120, 160, 200 ns
     ),
     code(
         """
-(
-    raw_time_s,
-    average_raw_traces,
-    iq_time_s,
-    average_iq_traces,
-) = experiment.acquire_sequence_traces(
+sequence_result = experiment._acquire_sequence_decimated(
     number_of_steps=len(DELAY_VALUES_NS),
     number_of_averages=NUM_AVERAGES,
 )
+raw_time_s = sequence_result["raw_time_s"]
+average_raw_traces = sequence_result["raw_average"]
+iq_time_s = sequence_result["downconverted_time_s"]
+average_iq_traces = sequence_result["downconverted_average"]
 
 sequence_records = experiment.last_sequence_records_volts
 sequence_shot_iq = experiment.last_sequence_shot_iq

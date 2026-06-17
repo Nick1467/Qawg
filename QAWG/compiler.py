@@ -286,13 +286,31 @@ class CompiledExperiment:
         *,
         hardware: Any | None = None,
         filter_type: str = "boxcar",
-    ) -> ExperimentResult:
-        """Compatibility wrapper delegated to the hardware coordinator."""
+    ) -> dict[str, Any]:
+        """Acquire integrated-window IQ means using dict-style data keys."""
         target = hardware or self._hardware
         if target is None:
             raise RuntimeError("Bind an AWGAlazar instance before acquire")
         self._hardware = target
         return target.acquire_compiled_experiment(
+            self,
+            n_average=n_average,
+            filter_type=filter_type,
+        )
+
+    def acquire_decimate(
+        self,
+        n_average: int,
+        *,
+        hardware: Any | None = None,
+        filter_type: str = "boxcar",
+    ) -> dict[str, Any]:
+        """Acquire raw and downconverted traces using dict-style data keys."""
+        target = hardware or self._hardware
+        if target is None:
+            raise RuntimeError("Bind an AWGAlazar instance before acquire")
+        self._hardware = target
+        return target.acquire_compiled_decimate(
             self,
             n_average=n_average,
             filter_type=filter_type,
@@ -319,10 +337,18 @@ class ExperimentProgram:
         self.sweeps: dict[str, LinearSweep | ValuesSweep] = {}
         self.pulses: dict[str, PulseDefinition] = {}
         self.events: list[ProgramEvent] = []
-        self._initialize(cfg)
-        self._body(cfg)
+        self.init(cfg)
+        self.body(cfg)
         if "ro" not in self.readouts:
             raise ValueError("Programs must declare the 'ro' readout")
+
+    def init(self, cfg: dict[str, Any]) -> None:
+        """Declare generators, readouts, sweeps, and pulses."""
+        self._initialize(cfg)
+
+    def body(self, cfg: dict[str, Any]) -> None:
+        """Build the pulse and trigger sequence."""
+        self._body(cfg)
 
     def _initialize(self, cfg: dict[str, Any]) -> None:
         raise NotImplementedError
@@ -510,13 +536,14 @@ class ExperimentProgram:
             raise ValueError("sample_rate_hz must be positive")
         points, axes = self._sweep_points()
         scheduled = tuple(self._schedule_point(point) for point in points)
+        readout = self.readouts["ro"]
         tagged_starts = [
             pulse.start_s
             for scheduled_point in scheduled
             for pulse in scheduled_point.pulses
             if pulse.definition.is_readout
         ]
-        if tagged_starts:
+        if tagged_starts and readout.waveform_channel is not None:
             padding_s = self.readouts["ro"].marker_padding_s
             sequence_shift_s = max(0.0, padding_s - min(tagged_starts))
             if sequence_shift_s:
@@ -546,7 +573,6 @@ class ExperimentProgram:
             channel: np.zeros((len(points), step_samples), dtype=np.float64)
             for channel in channel_amplitudes
         }
-        readout = self.readouts["ro"]
         integrate_time_s = (
             readout.length_s
             if readout.integrate_time_s is None
@@ -575,7 +601,11 @@ class ExperimentProgram:
         for point_index, scheduled_point in enumerate(scheduled):
             for pulse in scheduled_point.pulses:
                 generator = self.generators[pulse.definition.generator]
-                values = self._render_pulse(pulse, sample_rate_hz)
+                values = self._render_pulse(
+                    pulse,
+                    sample_rate_hz,
+                    generator.amplitude_vpp,
+                )
                 start = int(round(pulse.start_s * sample_rate_hz))
                 stop = start + values.size
                 channel_waveforms[generator.channel][
@@ -743,7 +773,11 @@ class ExperimentProgram:
             )
             trigger_delay_s = (
                 readout.marker_padding_s
-                if event.trigger_delay_s is None and has_tagged_readout
+                if (
+                    event.trigger_delay_s is None
+                    and has_tagged_readout
+                    and readout.waveform_channel is not None
+                )
                 else (
                     0.0
                     if event.trigger_delay_s is None
@@ -762,25 +796,25 @@ class ExperimentProgram:
         ]
         if tagged_readout_pulses:
             if readout.waveform_channel is None:
-                raise ValueError(
-                    "Tagged readout pulses require readout waveform_ch"
+                readout_stop = readout.length_s
+                marker_stop = float(readout.marker_length_s)
+            else:
+                tagged_channels = {
+                    self.generators[pulse.definition.generator].channel
+                    for pulse in tagged_readout_pulses
+                }
+                if tagged_channels != {readout.waveform_channel}:
+                    raise ValueError(
+                        "Tagged readout pulses must use the readout waveform_ch"
+                    )
+                readout_start = min(
+                    pulse.start_s for pulse in tagged_readout_pulses
                 )
-            tagged_channels = {
-                self.generators[pulse.definition.generator].channel
-                for pulse in tagged_readout_pulses
-            }
-            if tagged_channels != {readout.waveform_channel}:
-                raise ValueError(
-                    "Tagged readout pulses must use the readout waveform_ch"
+                readout_stop = readout_start + readout.length_s
+                marker_stop = (
+                    max(pulse.stop_s for pulse in tagged_readout_pulses)
+                    + readout.marker_padding_s
                 )
-            readout_start = min(
-                pulse.start_s for pulse in tagged_readout_pulses
-            )
-            readout_stop = readout_start + readout.length_s
-            marker_stop = (
-                max(pulse.stop_s for pulse in tagged_readout_pulses)
-                + readout.marker_padding_s
-            )
         elif readout.waveform_channel is None:
             readout_stop = readout.length_s
             marker_stop = float(readout.marker_length_s)
@@ -851,14 +885,18 @@ class ExperimentProgram:
     def _render_pulse(
         pulse: ScheduledPulse,
         sample_rate_hz: float,
+        amplitude_vpp: float,
     ) -> npt.NDArray[np.float64]:
+        if amplitude_vpp <= 0:
+            raise ValueError("amplitude_vpp must be positive")
+        scale = pulse.gain * amplitude_vpp / 2.0
         count = max(
             1,
             int(round((pulse.stop_s - pulse.start_s) * sample_rate_hz)),
         )
         style = pulse.definition.style
         if style == "const":
-            envelope = constant(count, pulse.gain)
+            envelope = constant(count, 1.0)
         elif style == "gaussian":
             sigma_s = pulse.sigma_s
             if sigma_s is None or sigma_s <= 0:
@@ -867,7 +905,7 @@ class ExperimentProgram:
                 count,
                 sample_rate_hz,
                 sigma_s,
-                pulse.gain,
+                1.0,
             )
         elif style == "gaussian_square":
             sigma_s = pulse.edge_sigma_s
@@ -880,7 +918,7 @@ class ExperimentProgram:
                     count,
                     sample_rate_hz,
                     sigma_s,
-                    pulse.gain,
+                    1.0,
                 )
             except ValueError as exc:
                 raise ValueError(
@@ -897,7 +935,7 @@ class ExperimentProgram:
                     count,
                     sample_rate_hz,
                     edge_length_s,
-                    pulse.gain,
+                    1.0,
                 )
             except ValueError as exc:
                 raise ValueError(
@@ -910,11 +948,12 @@ class ExperimentProgram:
                     "Exponential pulses require decay > 0"
                 )
             time_s = np.arange(count, dtype=np.float64) / sample_rate_hz
-            envelope = pulse.gain * np.exp(-time_s / (2.0 * decay_s))
+            envelope = np.exp(-time_s / (2.0 * decay_s))
 
-        return modulate_envelope(
+        waveform = modulate_envelope(
             envelope,
             sample_rate_hz,
             pulse.frequency_hz,
             pulse.phase_radians,
         )
+        return waveform * scale

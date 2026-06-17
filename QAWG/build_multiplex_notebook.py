@@ -34,11 +34,12 @@ notebook.cells = [
 This notebook builds two readout tones on one AWG channel and demodulates both
 tones from the same ATS9371 voltage records.
 
-The compiler currently owns one readout frequency, so multiplex acquisition
-uses the lower-level boundaries intentionally:
+The compiler currently owns one readout frequency, so multiplex DSP reuses the
+raw acquisition window retained by the public acquisition call:
 
 1. `QAWG.awg5200` creates the summed waveform and marker.
-2. `AWGAlazar.acquire_records(n_average=...)` captures unprocessed records.
+2. `AWGAlazar.acquire(n_average=...)` captures and stores the acquisition
+   window.
 3. `AlazarProcessor.process_multiplex_integrate(...)` extracts one IQ point
    per tone and per shot.
 
@@ -65,13 +66,13 @@ from QAWG.awg5200 import (
     waveform,
 )
 
-# Reload the local module so a long-running Jupyter kernel does not keep an
-# AWGAlazar class imported before acquire_records() was added.
+# Reload the local module so a long-running Jupyter kernel does not keep a
+# stale AWGAlazar class.
 awg_alazar_module = importlib.reload(awg_alazar_module)
 AWGAlazar = awg_alazar_module.AWGAlazar
 
 print("QAWG hardware module:", awg_alazar_module.__file__)
-print("Raw acquisition API available:", hasattr(AWGAlazar, "acquire_records"))
+print("Acquisition API available:", hasattr(AWGAlazar, "acquire"))
 """
     ),
     markdown("## Shared multiplex configuration"),
@@ -267,7 +268,7 @@ HARDWARE_ACQUIRE_WINDOW = 1.5 * us
 INTEGRATE_WINDOW = (100 * ns, 1100 * ns)
 N_AVERAGE = 1000
 
-if not hasattr(AWGAlazar, "acquire_records"):
+if not hasattr(AWGAlazar, "acquire"):
     raise RuntimeError(
         "This kernel has an older AWGAlazar class. Restart the kernel and "
         "run all cells from the beginning."
@@ -352,15 +353,20 @@ upload_multiplexed_readout(
     ),
     markdown(
         """
-## Acquire raw records and demodulate both tones
+## Acquire and demodulate both tones
 
-`acquire_records()` arms the ATS9371, runs the AWG, and returns one raw voltage
-record per trigger. The same records are then processed at both frequencies.
+`acquire()` arms the ATS9371, runs the AWG, and keeps the raw acquisition window
+on the experiment object. The retained records are then processed at both
+frequencies.
 """
     ),
     code(
         """
-raw_time_s, records = experiment.acquire_records(n_average=N_AVERAGE)
+experiment.acquire(n_average=N_AVERAGE)
+if experiment.last_records_volts is None:
+    raise RuntimeError("acquire() did not retain raw records")
+records = experiment.last_records_volts.copy()
+raw_time_s = np.arange(records.shape[1]) / experiment.alazar_sample_rate_hz
 integrate_start, integrate_stop = experiment.integrate_window_cycles
 
 hardware_results = experiment.processor.process_multiplex_integrate(
@@ -413,9 +419,10 @@ for state_name, phase in {
         phases_rad={"q0": phase, "q1": phase},
         name=state_name,
     )
-    _, state_records[state_name] = experiment.acquire_records(
-        n_average=N_AVERAGE,
-    )
+    experiment.acquire(n_average=N_AVERAGE)
+    if experiment.last_records_volts is None:
+        raise RuntimeError("acquire() did not retain raw records")
+    state_records[state_name] = experiment.last_records_volts.copy()
 
 state_results = {
     state_name: experiment.processor.process_multiplex_integrate(

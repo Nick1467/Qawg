@@ -227,8 +227,16 @@ class WaveformTests(unittest.TestCase):
         self.assertEqual(len(result) - offset, 2400 * 5)
 
     def test_waveform_range_error_reports_required_vpp(self) -> None:
-        with self.assertRaisesRegex(ValueError, r"use amplitude_vpp >= 0.6 V"):
-            make_wfmx(np.full(2400, 0.3), amplitude_vpp=0.5)
+        with self.assertRaisesRegex(ValueError, r"use amplitude_vpp >= 1.2 V"):
+            make_wfmx(np.full(2400, 0.6), amplitude_vpp=0.5)
+
+    def test_waveform_binary_uses_vpp_half_range_as_full_scale(self) -> None:
+        result = make_wfmx(np.full(2400, 0.25), amplitude_vpp=0.5)
+        match = re.search(br'<DataFile offset="(\d{9})"', result)
+        self.assertIsNotNone(match)
+        offset = int(match.group(1))
+        samples = np.frombuffer(result[offset : offset + 4], dtype="<f4")
+        self.assertEqual(samples[0], 1.0)
 
     def test_ieee_block(self) -> None:
         self.assertEqual(ieee_block(b"abcd"), b"#14abcd")
@@ -460,8 +468,8 @@ class DriverTests(unittest.TestCase):
 
     def test_upload_timeline_range_error_reports_channel(self) -> None:
         self.awg.set_sample_rate(1e9)
-        too_large = waveform(np.full(2400, 0.3), fc=0, ch=4)
-        with self.assertRaisesRegex(ValueError, r"Channel 4: waveform peak 0.3 V"):
+        too_large = waveform(np.full(2400, 0.6), fc=0, ch=4)
+        with self.assertRaisesRegex(ValueError, r"Channel 4: waveform peak 0.6 V"):
             self.awg.upload_timeline(too_large, amplitude_vpp={4: 0.5})
 
     def test_waveform_gain(self) -> None:

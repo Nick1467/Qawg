@@ -150,12 +150,21 @@ class AWGAlazarTests(unittest.TestCase):
             "_capture_records",
             return_value=records,
         ):
-            output_time_s, average_iq = experiment.acquire_decimate(4)
+            result = experiment.acquire_decimate(4)
 
-        self.assertEqual(output_time_s[0], 0.0)
-        self.assertEqual(average_iq.size, 237)
-        np.testing.assert_allclose(average_iq.real, 0.1, atol=1e-12)
-        np.testing.assert_allclose(average_iq.imag, 0.0, atol=1e-12)
+        self.assertEqual(result["raw_time_s"][0], 0.0)
+        self.assertEqual(result["raw_traces"].shape, (4, 256))
+        self.assertEqual(result["downconverted_average"].size, 237)
+        np.testing.assert_allclose(
+            result["downconverted_average"].real,
+            0.1,
+            atol=1e-12,
+        )
+        np.testing.assert_allclose(
+            result["downconverted_average"].imag,
+            0.0,
+            atol=1e-12,
+        )
         self.assertEqual(experiment.last_shot_iq.shape, (4, 237))
 
     def test_acquire_decimate_supports_various_filters(self) -> None:
@@ -173,16 +182,16 @@ class AWGAlazarTests(unittest.TestCase):
             "_capture_records",
             return_value=records,
         ):
-            t_s, avg_iq = experiment.acquire_decimate(2, filter_type="butterworth")
-            self.assertEqual(avg_iq.size, 256)
+            result = experiment.acquire_decimate(2, filter_type="butterworth")
+            self.assertEqual(result["downconverted_average"].size, 256)
             self.assertEqual(experiment.last_shot_iq.shape, (2, 256))
 
-            t_s, avg_iq = experiment.acquire_decimate(2, filter_type="elliptic")
-            self.assertEqual(avg_iq.size, 256)
+            result = experiment.acquire_decimate(2, filter_type="elliptic")
+            self.assertEqual(result["downconverted_average"].size, 256)
             self.assertEqual(experiment.last_shot_iq.shape, (2, 256))
 
-            t_s, avg_iq = experiment.acquire_decimate(2, filter_type="notch")
-            self.assertEqual(avg_iq.size, 256)
+            result = experiment.acquire_decimate(2, filter_type="notch")
+            self.assertEqual(result["downconverted_average"].size, 256)
             self.assertEqual(experiment.last_shot_iq.shape, (2, 256))
 
             with self.assertRaises(ValueError):
@@ -202,20 +211,17 @@ class AWGAlazarTests(unittest.TestCase):
             "_capture_records",
             return_value=records,
         ):
-            iq, downconverted_iq = experiment.acquire(4)
+            result = experiment.acquire(4)
 
-        self.assertAlmostEqual(iq.real, 0.1, places=12)
-        self.assertAlmostEqual(iq.imag, 0.0, places=12)
-        self.assertEqual(downconverted_iq.shape, (4, 256))
-        np.testing.assert_array_equal(
-            downconverted_iq,
-            experiment.last_downconverted_iq,
-        )
+        self.assertAlmostEqual(result["integrated_iq"].real, 0.1, places=12)
+        self.assertAlmostEqual(result["integrated_iq"].imag, 0.0, places=12)
+        self.assertEqual(result["shot_iq"].shape, (4,))
         self.assertEqual(experiment.last_shot_iq.shape, (4,))
+        self.assertEqual(experiment.last_downconverted_iq.shape, (4, 256))
         self.assertEqual(experiment.last_time_s[0], 0.0)
-        self.assertAlmostEqual(experiment.last_time_s[1], 1e-9)
+        self.assertAlmostEqual(experiment.last_time_s[1] - experiment.last_time_s[0], 1e-9)
 
-    def test_acquire_sequence_traces_averages_matching_steps(self) -> None:
+    def test_sequence_integrated_acquisition_keeps_matching_steps(self) -> None:
         experiment = self.make_experiment()
         time_s = np.arange(256) / experiment.alazar_sample_rate_hz
         step_zero = 0.1 * np.cos(2 * np.pi * 50e6 * time_s)
@@ -229,25 +235,32 @@ class AWGAlazarTests(unittest.TestCase):
             "_capture_records",
             return_value=records,
         ) as mock_capture:
-            raw_time, average_records, iq_time, average_iq = (
-                experiment.acquire_sequence_traces(
-                    number_of_steps=2,
-                    number_of_averages=3,
-                )
+            result = experiment._acquire_sequence_decimated(
+                number_of_steps=2,
+                number_of_averages=3,
             )
 
         mock_capture.assert_called_once_with(n_average=6)
-        self.assertEqual(average_records.shape, (2, 256))
-        self.assertEqual(average_iq.shape, (2, 237))
-        np.testing.assert_allclose(average_records[0], step_zero)
-        np.testing.assert_allclose(average_records[1], step_one)
-        np.testing.assert_allclose(average_iq[0].real, 0.1, atol=1e-12)
-        np.testing.assert_allclose(average_iq[1].real, 0.2, atol=1e-12)
-        self.assertEqual(raw_time.size, 256)
-        self.assertEqual(iq_time.size, 237)
+        self.assertEqual(result["raw_time_s"].size, 256)
+        self.assertEqual(result["downconverted_time_s"].size, 237)
+        self.assertAlmostEqual(result["downconverted_time_s"][0], 0.0)
         self.assertEqual(
             experiment.last_sequence_records_volts.shape,
             (3, 2, 256),
+        )
+        self.assertEqual(experiment.last_sequence_shot_iq.shape, (3, 2, 237))
+        np.testing.assert_allclose(
+            np.mean(experiment.last_sequence_records_volts, axis=0)[0],
+            step_zero,
+        )
+        np.testing.assert_allclose(
+            np.mean(experiment.last_sequence_records_volts, axis=0)[1],
+            step_one,
+        )
+        np.testing.assert_allclose(
+            np.mean(experiment.last_sequence_shot_iq, axis=(0, 2)).real,
+            [0.1, 0.2],
+            atol=1e-12,
         )
 
     def test_acquisition_config_respects_n_average(self) -> None:
@@ -273,22 +286,13 @@ class AWGAlazarTests(unittest.TestCase):
             experiment.acquire(n_average=8)
             mock_capture.assert_called_once_with(n_average=8)
 
-    def test_acquire_records_returns_time_axis_and_raw_records(self) -> None:
+    def test_only_acquire_and_acquire_decimate_are_public_data_pull_apis(self) -> None:
         experiment = self.make_experiment()
-        records = np.ones((5, 256))
 
-        with patch.object(
-            experiment,
-            "_capture_records",
-            return_value=records,
-        ) as mock_capture:
-            time_s, acquired = experiment.acquire_records(n_average=5)
-
-        mock_capture.assert_called_once_with(n_average=5)
-        self.assertEqual(time_s.shape, (256,))
-        self.assertAlmostEqual(time_s[1], 1e-9)
-        np.testing.assert_array_equal(acquired, records)
-        self.assertIsNot(acquired, records)
+        self.assertTrue(callable(experiment.acquire))
+        self.assertTrue(callable(experiment.acquire_decimate))
+        self.assertFalse(hasattr(experiment, "acquire_records"))
+        self.assertFalse(hasattr(experiment, "acquire_sequence_traces"))
 
     def test_capture_diagnostics_reports_adc_resolution_and_offset(self) -> None:
         experiment = self.make_experiment(adc_channel="CHB")
@@ -352,6 +356,36 @@ class AWGAlazarTests(unittest.TestCase):
         self.assertEqual(experiment.adc_channel_name, "CHB")
         self.assertEqual(configure.call_args.kwargs["channel"], CHANNEL_B)
 
+    def test_upload_uses_fixed_declared_channel_vpp(self) -> None:
+        experiment = self.make_experiment()
+        experiment.awg.upload_waveform_asset.return_value = "asset"
+        experiment.awg.create_sequence.return_value = "seq"
+        readout = SimpleNamespace(
+            marker_channel=1,
+            marker_number=1,
+            marker_low_volts=0.0,
+            marker_high_volts=1.2,
+        )
+        compiled = SimpleNamespace(
+            program_name="fixed_vpp",
+            number_of_sequence_steps=1,
+            channel_waveforms={1: np.full((1, 256), 0.125)},
+            marker_waveforms=np.zeros((1, 256), dtype=bool),
+            readout=readout,
+            channel_amplitudes_vpp={1: 0.5},
+        )
+
+        experiment.upload_compiled_experiment(compiled)
+
+        experiment.awg.upload_waveform_asset.assert_called_once()
+        self.assertEqual(
+            experiment.awg.upload_waveform_asset.call_args.kwargs[
+                "amplitude_vpp"
+            ],
+            0.5,
+        )
+        experiment.awg.set_channel_amplitude.assert_called_with(1, 0.5)
+
     def test_compiled_acquisition_is_owned_by_hardware_coordinator(self) -> None:
         experiment = self.make_experiment(acquire_window_ns=256)
         readout = SimpleNamespace(
@@ -371,7 +405,7 @@ class AWGAlazarTests(unittest.TestCase):
         experiment._uploaded_compiled = compiled
         experiment.last_sequence_records_volts = np.ones((3, 2, 256))
         experiment.last_sequence_shot_iq = np.ones(
-            (3, 2, 237),
+            (3, 2, 80),
             dtype=complex,
         )
 
@@ -379,13 +413,14 @@ class AWGAlazarTests(unittest.TestCase):
             patch.object(experiment, "configure_experiment") as configure,
             patch.object(
                 experiment,
-                "acquire_sequence_traces",
-                return_value=(
-                    np.arange(256) / 1e9,
-                    np.ones((2, 256)),
-                    np.arange(237) / 1e9,
-                    np.ones((2, 237), dtype=complex),
-                ),
+                "_acquire_sequence_decimated",
+                return_value={
+                    "raw_time_s": np.arange(256) / 1e9,
+                    "raw_traces": np.ones((3, 2, 256)),
+                    "downconverted_time_s": np.arange(80) / 1e9,
+                    "downconverted_traces": np.ones((3, 2, 80), dtype=complex),
+                    "downconverted_average": np.ones((2, 80), dtype=complex),
+                },
             ) as acquire,
         ):
             result = experiment.acquire_compiled_experiment(
@@ -405,8 +440,10 @@ class AWGAlazarTests(unittest.TestCase):
             filter_type="boxcar",
             remove_dc_offset=False,
         )
-        self.assertEqual(result.raw.shape, (3, 2, 256))
-        self.assertEqual(result.shots().shape, (3, 2))
+        self.assertEqual(result["integrated_iq"].shape, (2,))
+        self.assertEqual(result["shot_iq"].shape, (3, 2))
+        self.assertNotIn("raw_traces", result)
+        self.assertNotIn("downconverted_traces", result)
 
     def test_sequence_dc_offset_is_removed_before_demodulation(self) -> None:
         experiment = self.make_experiment()
@@ -419,7 +456,7 @@ class AWGAlazarTests(unittest.TestCase):
             "_capture_records",
             return_value=records,
         ):
-            experiment.acquire_sequence_traces(
+            experiment._acquire_sequence_decimated(
                 number_of_steps=1,
                 number_of_averages=2,
                 remove_dc_offset=True,
