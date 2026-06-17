@@ -8,18 +8,22 @@ QAWG 是用於 Tektronix AWG5208 與 AlazarTech ATS9371 的 host-side
 
 ```text
 QAWG/
-├── awg5200/       waveform、marker、sequence 與 AWG5208 SCPI driver
+├── timeline.py    hardware-independent waveform timing helpers
+├── awg5200/       AWG5208 waveform upload、marker、sequence 與 SCPI driver
 ├── alazar/        ATS9371 acquisition、ADC conversion 與 signal processing
+├── averager.py    shot integration、averaging 與 result reductions
 ├── compiler.py    sweep、pulse timing 與實驗規則
 ├── awg_alazar.py  AWG 與 Alazar 的執行協調層
-└── examples.py    spectroscopy、Power Rabi、T1 與 single-shot 範例
+└── tomography.py  heterodyne tomography helpers
 ```
 
 各模組的責任如下：
 
-- **Alazar**：擷取與處理 digitized data，包括 demodulation、filter、
-  integration 與 shot averaging。
-- **AWG**：產生 waveform、marker 與 sequence，並管理 AWG5208 hardware。
+- **Timeline**：手動 waveform timing、parallel waveform 與 delay composition。
+- **Alazar**：擷取與處理 digitized data，包括 demodulation、filter 與
+  low-level DMA。
+- **Averager**：integration window 內的 shot IQ、mean IQ 與 result reduction。
+- **AWG**：上傳 waveform、marker 與 sequence，並管理 AWG5208 hardware。
 - **Compiler**：展開 sweep、驗證 timing，產生不依賴硬體的 compiled plan。
 - **AWGAlazar**：設定兩台儀器、上傳 compiled plan、啟動 acquisition 並組裝結果。
 
@@ -202,11 +206,14 @@ python QAWG\build_demo_notebook.py
 才會連接 AWG5208 與 ATS9371。
 
 [multiplex.ipynb](multiplex.ipynb) 示範在同一 AWG channel 疊加兩個 readout
-tones，擷取共同的 raw ATS9371 records，再分別 demodulate 每個 frequency。
-Multiplex averaging 使用：
+tones，透過 trace acquisition 保留共同的 ATS9371 acquire-window records，
+再分別 demodulate 每個 frequency。Multiplex averaging 使用：
 
 ```python
-raw_time_s, records = experiment.acquire_records(n_average=1000)
+trace_time_s, raw_window, downconverted_window = experiment.acquire_decimate(
+    n_average=1000,
+)
+records = experiment.last_records_volts
 ```
 
 `n_average` 屬於 acquisition，不是 `AWGAlazar.connect()` 的參數。重新產生
@@ -236,6 +243,7 @@ python -m pytest -q
   +/-400 mV input range。
 
 更完整的 compiler 使用說明請參考
-[QAWG/README.md](QAWG/README.md)。AWG timeline 與底層 driver 說明位於
+[QAWG/README.md](QAWG/README.md)。Timeline helpers 位於
+[QAWG/timeline.py](QAWG/timeline.py)，AWG5208 底層 driver 說明位於
 [QAWG/awg5200](QAWG/awg5200)，Alazar acquisition 與 DSP 位於
 [QAWG/alazar](QAWG/alazar)。

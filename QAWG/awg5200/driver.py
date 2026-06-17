@@ -10,7 +10,7 @@ import numpy as np
 import numpy.typing as npt
 
 from .transport import ScpiTransport, open_visa_transport
-from .timeline import (
+from ..timeline import (
     Parallel,
     Timeline,
     Waveform,

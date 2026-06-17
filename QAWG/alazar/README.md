@@ -7,6 +7,13 @@ conversion、digital downconversion、filter、integration 與 multiplex DSP。
 這一層不建立 AWG waveform 或 sequence。AWG 與 Alazar 的執行順序由
 `QAWG.awg_alazar.AWGAlazar` 協調。
 
+概念上分成兩個時間範圍：
+
+- **Acquire window**：ATS trigger delay 後擷取到的完整 ADC record，用來 debug
+  raw trace 與 demodulated trace。
+- **Integration window**：在 acquire window 內選一段 `[delay, integration_time]`
+  計算每 shot IQ。
+
 ## 模組責任
 
 ```text
@@ -65,54 +72,51 @@ experiment = AWGAlazar.connect(
 
 `n_average` 是 acquisition 參數，不是 `connect()` 參數。
 
-### Raw records
+`AWGAlazar` 只保留兩個直接 acquisition entry points：
 
-自訂 DSP 或 multiplex readout 應先取得未處理 voltage records：
+- `acquire_decimate()`：trace/debug mode，回傳 integration window 內的 raw 與
+  low-pass demodulated traces。
+- `acquire()`：averaged/integrated mode，回傳 integration window 內的 per-shot IQ
+  和 mean IQ。
+
+兩者都會保留 full acquire-window debug data：
 
 ```python
-raw_time_s, records = experiment.acquire_records(n_average=1000)
+experiment.last_records_volts       # (shot, acquire_sample)
+experiment.last_downconverted_iq    # (shot, acquire_sample)
+experiment.last_time_s              # (acquire_sample,)
+```
+
+### Time-resolved traces
+
+```python
+trace_time_s, raw_window, downconverted_window = experiment.acquire_decimate(
+    n_average=1000,
+)
 ```
 
 Shape：
 
 ```text
-raw_time_s: (adc_sample,)
-records:    (n_average, adc_sample)
+trace_time_s:         (integration_sample,)
+raw_window:           (n_average, integration_sample)
+downconverted_window: (n_average, integration_sample)
 ```
+
+Full acquire-window raw records and downconverted records are retained on the
+experiment object as `last_records_volts` and `last_downconverted_iq`.
 
 ### Single-frequency integrated IQ
 
 ```python
-average_iq, baseband = experiment.acquire(n_average=1000)
+shots, mean_iq = experiment.acquire(n_average=1000)
 ```
 
 Shape：
 
 ```text
-average_iq: scalar complex
-baseband:   (n_average, adc_sample)
-```
-
-### Time-resolved IQ
-
-```python
-iq_time_s, average_iq_trace = experiment.acquire_decimate(
-    n_average=1000,
-    filter_type="boxcar",
-)
-```
-
-可用 filter：
-
-- `"boxcar"`
-- `"butterworth"` 或 `"butter"`
-- `"elliptic"` 或 `"ellip"`
-- `"notch"` 或 `"adaptive_notch"`
-
-SciPy filters 需要安裝：
-
-```powershell
-pip install scipy
+shots:  (n_average,)
+mean_iq: scalar complex
 ```
 
 ## AlazarProcessor
@@ -161,7 +165,6 @@ baseband, shot_iq_trace, average_iq_trace = processor.process_decimate(
     tone_frequency_hz=50e6,
     reference_phase_radians=0.0,
     moving_average_samples=20,
-    filter_type="boxcar",
 )
 ```
 
@@ -253,24 +256,9 @@ finally:
 實際流程必須在 `start_capture()` 前先完成 AWG waveform/sequence 準備，並在
 ATS arm 後才啟動 AWG。一般情況下由 `AWGAlazar` 處理這個順序較安全。
 
-## Diagnostics
+## Retained acquisition data
 
-完成 acquisition 後：
-
-```python
-diagnostics = experiment.capture_diagnostics()
-```
-
-內容包括：
-
-- ADC channel 與 resolution
-- LSB voltage
-- Raw code minimum/maximum
-- Mean DC offset
-- Averaged trace peak-to-peak
-- Shot noise standard deviation
-
-最近一次 acquisition 也保留在：
+最近一次 `acquire()` 或 `acquire_decimate()` 會保留：
 
 ```python
 experiment.last_raw_codes
@@ -280,9 +268,14 @@ experiment.last_shot_iq
 experiment.last_time_s
 ```
 
+`last_records_volts` 和 `last_downconverted_iq` 都是 full acquire window，用於
+debug timing、TOF、ring-up/ring-down 和 unexpected trigger alignment。
+`last_shot_iq` 則是 integration window 內積分後的 per-shot IQ。
+
 ## Data ownership
 
 - ATS DMA 與 ADC conversion：`ats9371.py`
-- DSP：`demodulation.py`、`processor.py`
-- AWG start/stop 與 acquisition coordination：`AWGAlazar`
+- DSP primitives：`demodulation.py`、`processor.py`
+- Shot integration / averaging：`QAWG.averager`
+- AWG start/stop 與 acquisition coordination：`QAWG.awg_alazar.AWGAlazar`
 - Experiment sweep 與 sequence record layout：`QAWG.compiler`

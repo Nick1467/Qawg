@@ -19,6 +19,7 @@ from .alazar import (
     arm_capture,
     configure_ats9371,
     correct_interleaving_offsets,
+    digital_downconvert,
     free_capture,
     open_ats9371,
     start_capture,
@@ -31,6 +32,13 @@ from .alazar.constants import (
     SAMPLES_PER_RECORD_ALIGNMENT,
     TRIGGER_SLOPE_NEGATIVE,
     TRIGGER_SLOPE_POSITIVE,
+)
+from .averager import (
+    average_shots,
+    compiled_averages,
+    integrate_shots,
+    remove_record_dc_offset,
+    validate_average_count,
 )
 from .awg5200 import AWG5208
 
@@ -177,12 +185,6 @@ class AWGAlazar:
         ) = None
         self.last_shot_iq: npt.NDArray[np.complex128] | None = None
         self.last_time_s: npt.NDArray[np.float64] | None = None
-        self.last_sequence_records_volts: (
-            npt.NDArray[np.float64] | None
-        ) = None
-        self.last_sequence_shot_iq: (
-            npt.NDArray[np.complex128] | None
-        ) = None
         self._uploaded_compiled: CompiledExperiment | None = None
 
         self._validate_settings()
@@ -491,8 +493,6 @@ class AWGAlazar:
         self,
         compiled: "CompiledExperiment",
         n_average: int,
-        *,
-        filter_type: str = "boxcar",
     ) -> "ExperimentResult":
         """Configure, execute, and collect one compiled experiment plan."""
         from .compiler import ExperimentResult
@@ -511,29 +511,39 @@ class AWGAlazar:
         if self._uploaded_compiled is not compiled:
             self.upload_compiled_experiment(compiled)
 
-        raw_time_s, _, iq_time_s, _ = self.acquire_sequence_traces(
-            number_of_steps=compiled.number_of_sequence_steps,
-            number_of_averages=n_average,
-            filter_type=filter_type,
-            remove_dc_offset=getattr(
-                compiled,
-                "remove_dc_offset",
-                False,
-            ),
+        steps = compiled.number_of_sequence_steps
+        averages = validate_average_count(n_average)
+        records = self._capture_records(n_average=steps * averages)
+        if getattr(compiled, "remove_dc_offset", False):
+            records = remove_record_dc_offset(records)
+            self.last_records_volts = records
+        baseband = digital_downconvert(
+            records,
+            self.alazar_sample_rate_hz,
+            self.tone_frequency_hz,
+            self.reference_phase_radians,
         )
-        raw = self.last_sequence_records_volts
-        iq_traces = self.last_sequence_shot_iq
-        if raw is None or iq_traces is None:
-            raise RuntimeError("Sequence acquisition did not return records")
+        downconverted = self._lowpass_downconverted_iq(baseband)
+        raw_time_s = (
+            np.arange(records.shape[1], dtype=np.float64)
+            / self.alazar_sample_rate_hz
+        )
+        iq_time_s = (
+            np.arange(downconverted.shape[1], dtype=np.float64)
+            / self.alazar_sample_rate_hz
+        )
+        integration_window = self._integration_slice(downconverted.shape[1])
+        averaged = compiled_averages(
+            records=records,
+            downconverted=downconverted,
+            number_of_steps=steps,
+            n_average=averages,
+            integration_window=integration_window,
+        )
+        self.last_downconverted_iq = downconverted
+        self.last_shot_iq = integrate_shots(downconverted, integration_window)
+        self.last_time_s = iq_time_s
 
-        integrate_start, integrate_stop = self.integrate_window_cycles
-        integrate_stop = min(iq_traces.shape[2], integrate_stop)
-        if integrate_start >= integrate_stop:
-            raise ValueError("Readout integration window is empty")
-        iq_shots = np.mean(
-            iq_traces[:, :, integrate_start:integrate_stop],
-            axis=2,
-        )
         marker_waveforms = getattr(compiled, "marker_waveforms", None)
         marker_windows_s = None
         if marker_waveforms is not None:
@@ -554,9 +564,9 @@ class AWGAlazar:
                 for name, values in compiled.axes.items()
             },
             point_coordinates=compiled.point_coordinates,
-            raw=raw.copy(),
-            iq_traces=iq_traces.copy(),
-            iq_shots=iq_shots,
+            raw=averaged.raw.copy(),
+            iq_traces=averaged.iq_traces.copy(),
+            iq_shots=averaged.iq_shots,
             raw_time_s=raw_time_s,
             iq_time_s=iq_time_s,
             readout_name=compiled.readout.name,
@@ -635,153 +645,90 @@ class AWGAlazar:
         self.last_records_volts = records
         return records
 
-    def acquire_records(
-        self,
-        n_average: int,
-    ) -> tuple[
-        npt.NDArray[np.float64],
-        npt.NDArray[np.float64],
-    ]:
-        """Acquire unprocessed voltage records for custom DSP pipelines."""
-        records = self._capture_records(n_average=n_average)
-        time_s = (
-            np.arange(records.shape[1], dtype=np.float64)
+    def _integration_slice(self, number_of_samples: int) -> slice:
+        start, stop = self.integrate_window_cycles
+        if not 0 <= start < stop <= number_of_samples:
+            raise ValueError("integration window is outside the acquired record")
+        return slice(start, stop)
+
+    def _record_time_axis(self, number_of_samples: int) -> npt.NDArray[np.float64]:
+        return (
+            np.arange(number_of_samples, dtype=np.float64)
             / self.alazar_sample_rate_hz
         )
-        self.last_time_s = time_s
-        return time_s, records.copy()
+
+    def _lowpass_downconverted_iq(
+        self,
+        baseband: npt.NDArray[np.complex128],
+    ) -> npt.NDArray[np.complex128]:
+        window_samples = self.moving_average_samples
+        if window_samples <= 1:
+            return baseband.copy()
+        if window_samples > baseband.shape[1]:
+            raise ValueError("moving_average_samples must fit inside the record length")
+        left = (window_samples - 1) // 2
+        right = window_samples // 2
+        padded = np.pad(baseband, ((0, 0), (left, right)), mode="edge")
+        kernel = np.ones(window_samples, dtype=np.float64) / window_samples
+        return np.apply_along_axis(
+            lambda row: np.convolve(row, kernel, mode="valid"),
+            axis=1,
+            arr=padded,
+        )
 
     def acquire_decimate(
         self,
         n_average: int,
-        filter_type: str = "boxcar",
     ) -> tuple[
+        npt.NDArray[np.float64],
         npt.NDArray[np.float64],
         npt.NDArray[np.complex128],
     ]:
-        """Acquire and return a shot-averaged, time-resolved IQ waveform."""
+        """Return raw and low-pass downconverted traces inside the integration window."""
         records = self._capture_records(n_average=n_average)
-        baseband, shot_iq, average_iq = self.processor.process_decimate(
-            records_volts=records,
-            tone_frequency_hz=self.tone_frequency_hz,
-            reference_phase_radians=self.reference_phase_radians,
-            moving_average_samples=self.moving_average_samples,
-            filter_type=filter_type,
+        baseband = digital_downconvert(
+            records,
+            self.alazar_sample_rate_hz,
+            self.tone_frequency_hz,
+            self.reference_phase_radians,
         )
-        time_s = (
-            np.arange(average_iq.size, dtype=np.float64)
-            / self.alazar_sample_rate_hz
-        )
+        downconverted = self._lowpass_downconverted_iq(baseband)
+        window = self._integration_slice(records.shape[1])
+        time_s = self._record_time_axis(records.shape[1])
 
-        self.last_downconverted_iq = baseband
-        self.last_shot_iq = shot_iq
+        self.last_downconverted_iq = downconverted
+        self.last_shot_iq = integrate_shots(downconverted, window)
         self.last_time_s = time_s
-        return time_s, average_iq
+        return (
+            time_s[window],
+            records[:, window].copy(),
+            downconverted[:, window].copy(),
+        )
 
     def acquire(
         self,
         n_average: int,
     ) -> tuple[
+        npt.NDArray[np.complex128],
         np.complex128,
-        npt.NDArray[np.complex128],
     ]:
-        """Return one averaged IQ point and every downconverted shot trace."""
+        """Return per-shot IQ points and their mean from the integration window."""
         records = self._capture_records(n_average=n_average)
-        integrate_start, integrate_stop = self.integrate_window_cycles
-        baseband, shot_iq, average_iq = self.processor.process_integrate(
-            records_volts=records,
-            tone_frequency_hz=self.tone_frequency_hz,
-            reference_phase_radians=self.reference_phase_radians,
-            integrate_start=integrate_start,
-            integrate_stop=integrate_stop,
+        window = self._integration_slice(records.shape[1])
+        baseband = digital_downconvert(
+            records,
+            self.alazar_sample_rate_hz,
+            self.tone_frequency_hz,
+            self.reference_phase_radians,
         )
+        downconverted = self._lowpass_downconverted_iq(baseband)
+        shot_iq = integrate_shots(downconverted, window)
+        average_iq = average_shots(shot_iq)
 
-        self.last_downconverted_iq = baseband
+        self.last_downconverted_iq = downconverted
         self.last_shot_iq = shot_iq
-        self.last_time_s = (
-            np.arange(baseband.shape[1], dtype=np.float64)
-            / self.alazar_sample_rate_hz
-        )
-        return average_iq, baseband
-
-    def acquire_sequence_traces(
-        self,
-        number_of_steps: int,
-        number_of_averages: int,
-        filter_type: str = "boxcar",
-        remove_dc_offset: bool = False,
-    ) -> tuple[
-        npt.NDArray[np.float64],
-        npt.NDArray[np.float64],
-        npt.NDArray[np.float64],
-        npt.NDArray[np.complex128],
-    ]:
-        """Acquire an interleaved sequence and average matching traces."""
-        steps = int(number_of_steps)
-        averages = int(number_of_averages)
-        if steps < 1 or averages < 1:
-            raise ValueError("number_of_steps and number_of_averages must be positive")
-
-        records = self._capture_records(n_average=steps * averages)
-        if remove_dc_offset:
-            records = records - np.mean(
-                records,
-                axis=1,
-                keepdims=True,
-            )
-        sequence_records = records.reshape(
-            averages,
-            steps,
-            records.shape[1],
-        )
-        average_records = np.mean(sequence_records, axis=0)
-
-        baseband, shot_iq, _ = self.processor.process_decimate(
-            records_volts=records,
-            tone_frequency_hz=self.tone_frequency_hz,
-            reference_phase_radians=self.reference_phase_radians,
-            moving_average_samples=self.moving_average_samples,
-            filter_type=filter_type,
-        )
-        sequence_shot_iq = shot_iq.reshape(
-            averages,
-            steps,
-            shot_iq.shape[1],
-        )
-        average_iq = np.mean(sequence_shot_iq, axis=0)
-        raw_time_s = (
-            np.arange(records.shape[1], dtype=np.float64)
-            / self.alazar_sample_rate_hz
-        )
-        iq_time_s = (
-            np.arange(shot_iq.shape[1], dtype=np.float64)
-            / self.alazar_sample_rate_hz
-        )
-
-        self.last_downconverted_iq = baseband
-        self.last_shot_iq = shot_iq
-        self.last_time_s = iq_time_s
-        self.last_sequence_records_volts = sequence_records
-        self.last_sequence_shot_iq = sequence_shot_iq
-        return raw_time_s, average_records, iq_time_s, average_iq
-
-    def capture_diagnostics(self) -> dict[str, float | int | str]:
-        """Summarize the most recent raw acquisition without modifying it."""
-        if self.last_raw_codes is None or self.last_records_volts is None:
-            raise RuntimeError("Run acquire() or acquire_decimate() first")
-        average = np.mean(self.last_records_volts, axis=0)
-        return {
-            "adc_channel": self.adc_channel_name,
-            "adc_bits": self.ats_board.bits_per_sample,
-            "adc_lsb_mv": self.adc_lsb_volts * 1e3,
-            "raw_code_min": int(np.min(self.last_raw_codes)),
-            "raw_code_max": int(np.max(self.last_raw_codes)),
-            "mean_offset_mv": float(np.mean(self.last_records_volts) * 1e3),
-            "average_peak_to_peak_mv": float(np.ptp(average) * 1e3),
-            "shot_noise_std_mv": float(
-                np.std(self.last_records_volts - average[None, :]) * 1e3
-            ),
-        }
+        self.last_time_s = self._record_time_axis(baseband.shape[1])
+        return shot_iq.copy(), average_iq
 
     def close(self) -> None:
         self.awg.close()

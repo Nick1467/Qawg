@@ -1,15 +1,19 @@
 # QAWG AWG5208
 
-`QAWG.awg5200` 負責 Tektronix AWG5208 的 waveform、marker、timeline、
+`QAWG.awg5200` 負責 Tektronix AWG5208 的 waveform upload、marker、
 sequence 與 SCPI hardware control。這一層不處理 Alazar data，也不定義
 實驗 sweep 規則。
+
+Timeline helper 的實作已搬到上層 `QAWG.timeline`，因為 timeline 是
+hardware-independent experiment-description layer，不是 AWG5208 driver
+boundary。`QAWG.awg5200` 仍 re-export timeline helpers 以維持舊程式相容。
 
 ## 模組責任
 
 ```text
 awg5200/
 ├── waveforms.py  envelope、carrier modulation、marker 與 WFMX encoding
-├── timeline.py   多 channel timing、delay、delay_auto 與 parallel
+├── timeline.py   compatibility re-export for QAWG.timeline
 ├── driver.py     AWG5208 SCPI、upload、marker、sequence 與 playback
 └── transport.py  PyVISA transport boundary
 ```
@@ -123,7 +127,8 @@ self.add_pulse(
 `waveform()` 接收 envelope，並記錄 carrier、channel、phase 與 gain：
 
 ```python
-from QAWG.awg5200 import cosine_square_ns, waveform
+from QAWG import waveform
+from QAWG.awg5200 import cosine_square_ns
 
 envelope = cosine_square_ns(
     duration_ns=1000,
@@ -149,7 +154,7 @@ Timing operators：
 - `parallel(...)`：多個 waveform 同時開始，可位於不同 channel 或同一 channel。
 
 ```python
-from QAWG.awg5200 import delay_auto, parallel, waveform
+from QAWG import delay_auto, parallel, waveform
 
 drive_q0 = waveform(envelope, fc=50e6, ch=3, gain=0.02)
 drive_q1 = waveform(envelope, fc=150e6, ch=3, gain=0.01)
@@ -161,7 +166,7 @@ timeline = parallel(drive_q0, drive_q1) / delay_auto(40e-9) / control
 Render 到共同 sample axis：
 
 ```python
-from QAWG.awg5200 import align_channel_envelopes, align_channels
+from QAWG import align_channel_envelopes, align_channels
 
 channel_waveforms = align_channels(
     timeline,
@@ -180,6 +185,14 @@ channel_envelopes = align_channel_envelopes(
 ```text
 abs(waveform peak) <= amplitude_vpp / 2
 ```
+
+舊式 import 仍可使用：
+
+```python
+from QAWG.awg5200 import waveform, delay_auto, align_channels
+```
+
+但新程式建議從 `QAWG` 或 `QAWG.timeline` 匯入 timeline helpers。
 
 ## Upload waveform 與 marker
 

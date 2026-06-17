@@ -7,7 +7,7 @@ from .driver import (
     TriggerSlope,
 )
 from .transport import ScpiTransport, open_visa_transport
-from .timeline import (
+from ..timeline import (
     Delay,
     Parallel,
     Timeline,

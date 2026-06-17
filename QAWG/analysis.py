@@ -164,23 +164,19 @@ def calculate_window(
         threshold,
         rise_index,
     )
-    suggested_trigger_s = max(
-        0.0,
-        initial_trigger_s + measured_rise_s - trigger_lead_s,
-    )
-    integration_start_s = 0.0
+    integration_start_s = max(0.0, measured_rise_s - trigger_lead_s)
     integration_stop_s = (
-        trigger_lead_s + readout_duration_s + integration_guard_s
+        integration_start_s + readout_duration_s + integration_guard_s
     )
     if result.acquire_window_s is not None:
         integration_stop_s = min(
             integration_stop_s,
             float(result.acquire_window_s),
         )
+    suggested_trigger_s = initial_trigger_s + integration_start_s
 
-    trigger_shift_s = suggested_trigger_s - initial_trigger_s
-    raw_plot_time_s = result.raw_time_s - trigger_shift_s
-    iq_plot_time_s = result.iq_time_s - trigger_shift_s
+    raw_plot_time_s = result.raw_time_s
+    iq_plot_time_s = result.iq_time_s
 
     figure = None
     axes: tuple[Any, Any] = (None, None)
@@ -204,8 +200,8 @@ def calculate_window(
         marker_label = None
         if result.marker_windows_s is not None:
             marker_start_s, marker_stop_s = result.marker_windows_s[step]
-            marker_start_s -= suggested_trigger_s
-            marker_stop_s -= suggested_trigger_s
+            marker_start_s -= initial_trigger_s
+            marker_stop_s -= initial_trigger_s
             marker_label = (
                 f"Marker high "
                 f"({(marker_stop_s - marker_start_s) * 1e9:.0f} ns)"
@@ -221,7 +217,7 @@ def calculate_window(
                     label=marker_label,
                 )
 
-        readout_plot_start_s = measured_rise_s - trigger_shift_s
+        readout_plot_start_s = measured_rise_s
         readout_plot_stop_s = readout_plot_start_s + readout_duration_s
         for axis in axes:
             axis.axvspan(
@@ -251,10 +247,10 @@ def calculate_window(
 
         axes[0].set_ylabel("ADC voltage (mV)")
         axes[0].set_title(
-            "Raw average aligned to suggested post-trigger delay "
-            f"({suggested_trigger_s * 1e9:.3f} ns)"
+            "Raw average in acquired window "
+            f"(post-trigger delay {initial_trigger_s * 1e9:.3f} ns)"
         )
-        axes[1].set_xlabel("Time after suggested ATS trigger (ns)")
+        axes[1].set_xlabel("Time in acquired window (ns)")
         axes[1].set_ylabel("|IQ| (mV)")
         axes[1].set_title("Demodulated readout envelope")
         for axis in axes:
@@ -263,17 +259,23 @@ def calculate_window(
         figure.tight_layout()
 
     if report:
-        print(f"Initial post-trigger delay: {initial_trigger_s * 1e9:.3f} ns")
-        print(f"Measured readout arrival: {measured_rise_s * 1e9:.3f} ns")
+        print(f"Configured post-trigger delay: {initial_trigger_s * 1e9:.3f} ns")
+        print(
+            "Measured readout arrival in acquire window: "
+            f"{measured_rise_s * 1e9:.3f} ns"
+        )
         print(f"Compiled readout duration: {readout_duration_s * 1e9:.3f} ns")
         print(
-            "Suggested post-trigger delay: "
-            f"{suggested_trigger_s * 1e9:.3f} ns"
+            "Suggested integration delay in acquire window: "
+            f"{integration_start_s * 1e9:.3f} ns"
         )
         print(
-            "Suggested integration window: "
-            f"{integration_start_s * 1e9:.3f} to "
-            f"{integration_stop_s * 1e9:.3f} ns"
+            "Suggested integration time: "
+            f"{(integration_stop_s - integration_start_s) * 1e9:.3f} ns"
+        )
+        print(
+            "Equivalent post-trigger delay if moved into ATS delay: "
+            f"{suggested_trigger_s * 1e9:.3f} ns"
         )
         print(f"DC offset removal: {result.remove_dc_offset}")
 

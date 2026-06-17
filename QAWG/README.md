@@ -7,19 +7,49 @@ The package owns the complete hardware stack:
 
 ```text
 QAWG/
-    awg5200/       Waveform, marker, sequence, and AWG5208 driver
+    timeline.py    Hardware-independent waveform timing helpers
+    awg5200/       AWG5208 waveform upload, marker, sequence, and driver
     alazar/        ATS9371 acquisition and signal processing
+    averager.py    Shot integration, averaging, and result reductions
     awg_alazar.py  AWG/Alazar execution coordinator
     compiler.py    Experiment rules and compiled sequence plan
-    examples.py    Spectroscopy, Power Rabi, T1, and single-shot programs
+    tomography.py  Heterodyne tomography helpers
 ```
 
 Common imports:
 
 ```python
-from QAWG import AWGAlazar, ExperimentProgram
-from QAWG.awg5200 import gaussian_square_ns, waveform
+from QAWG import AWGAlazar, ExperimentProgram, waveform, delay_auto
+from QAWG.awg5200 import gaussian_square_ns
 from QAWG.alazar import AlazarProcessor
+```
+
+## Layer responsibilities
+
+`QAWG.timeline` is the hardware-independent timeline helper layer. It is useful
+when you want to hand-build a waveform timeline from envelopes:
+
+```python
+readout = waveform(envelope, fc=50e6, ch=3, gain=0.02)
+drive = waveform(envelope, fc=100e6, ch=4, gain=0.02)
+timeline = drive / delay_auto(40 * ns) / readout
+```
+
+`ExperimentProgram` is the higher-level compiler DSL. `add_pulse()` records a
+pulse definition; it does not call `waveform()` immediately. During
+`compile()`, the compiler schedules `play()` / `trigger()` events, renders
+envelopes, modulates AWG waveforms, creates marker waveforms, and produces a
+hardware-independent `CompiledExperiment`.
+
+`AWGAlazar` is the hardware coordinator. It applies readout settings to the
+ATS9371, uploads the compiled AWG sequence when needed, arms Alazar, starts the
+AWG, captures records, demodulates records, and returns an `ExperimentResult`.
+It keeps full acquire-window debug data from the most recent acquisition on:
+
+```python
+experiment.last_records_volts
+experiment.last_downconverted_iq
+experiment.last_time_s
 ```
 
 ## Hardware vs experiment configuration
@@ -117,6 +147,18 @@ The execution model is different from FPGA firmware. Sweeps are expanded at
 compile time into AWG waveform assets and sequence-list steps. ATS records are
 captured in the same interleaved order and reshaped using the compiler's record
 layout.
+
+The normal lifecycle is:
+
+```text
+ExperimentProgram.add_pulse()/play()/trigger()
+    -> compile()
+    -> CompiledExperiment(channel_waveforms, marker_waveforms, readout timing)
+    -> compiled.upload() or compiled.acquire()
+    -> AWGAlazar uploads AWG sequence once when needed
+    -> AWGAlazar captures ATS acquire-window records
+    -> averager.py integrates shots and performs explicit reductions
+```
 
 ## Data contract
 

@@ -220,24 +220,28 @@ class ExperimentResult:
         return self.axes[name].copy()
 
     def trace_average(self, readout: str = "ro") -> npt.NDArray[np.float64]:
-        self._check_readout(readout)
-        return np.mean(self.raw, axis=0)
+        from .averager import trace_average
+
+        return trace_average(self, readout)
 
     def iq_trace_average(
         self, readout: str = "ro"
     ) -> npt.NDArray[np.complex128]:
-        self._check_readout(readout)
-        return np.mean(self.iq_traces, axis=0)
+        from .averager import iq_trace_average
+
+        return iq_trace_average(self, readout)
 
     def shots(self, readout: str = "ro") -> npt.NDArray[np.complex128]:
-        self._check_readout(readout)
-        return self.iq_shots.copy()
+        from .averager import shots
+
+        return shots(self, readout)
 
     def iq_average(
         self, readout: str = "ro"
     ) -> npt.NDArray[np.complex128]:
-        self._check_readout(readout)
-        return np.mean(self.iq_shots, axis=0)
+        from .averager import iq_average
+
+        return iq_average(self, readout)
 
 
 @dataclass
@@ -285,7 +289,6 @@ class CompiledExperiment:
         n_average: int,
         *,
         hardware: Any | None = None,
-        filter_type: str = "boxcar",
     ) -> ExperimentResult:
         """Compatibility wrapper delegated to the hardware coordinator."""
         target = hardware or self._hardware
@@ -295,7 +298,6 @@ class CompiledExperiment:
         return target.acquire_compiled_experiment(
             self,
             n_average=n_average,
-            filter_type=filter_type,
         )
 
 
