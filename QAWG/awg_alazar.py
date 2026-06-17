@@ -35,9 +35,7 @@ from .alazar.constants import (
 from .awg5200 import AWG5208
 
 if TYPE_CHECKING:
-    from .compiler import CompiledExperiment
-
-AcquisitionResult = dict[str, Any]
+    from .compiler import CompiledExperiment, ExperimentResult
 
 
 def seconds_to_samples(duration_s: float, sample_rate_hz: float) -> int:
@@ -495,8 +493,10 @@ class AWGAlazar:
         n_average: int,
         *,
         filter_type: str = "boxcar",
-    ) -> AcquisitionResult:
-        """Acquire compiled integrated-window IQ means."""
+    ) -> "ExperimentResult":
+        """Configure, execute, and collect one compiled experiment plan."""
+        from .compiler import ExperimentResult
+
         integrate_time_s = (
             compiled.readout.length_s
             if compiled.readout.integrate_time_s is None
@@ -511,7 +511,7 @@ class AWGAlazar:
         if self._uploaded_compiled is not compiled:
             self.upload_compiled_experiment(compiled)
 
-        sequence = self._acquire_sequence_decimated(
+        raw_time_s, _, iq_time_s, _ = self.acquire_sequence_traces(
             number_of_steps=compiled.number_of_sequence_steps,
             number_of_averages=n_average,
             filter_type=filter_type,
@@ -521,7 +521,10 @@ class AWGAlazar:
                 False,
             ),
         )
-        iq_traces = sequence["downconverted_traces"]
+        raw = self.last_sequence_records_volts
+        iq_traces = self.last_sequence_shot_iq
+        if raw is None or iq_traces is None:
+            raise RuntimeError("Sequence acquisition did not return records")
 
         integrate_start, integrate_stop = self.integrate_window_cycles
         integrate_stop = min(iq_traces.shape[2], integrate_stop)
@@ -531,42 +534,40 @@ class AWGAlazar:
             iq_traces[:, :, integrate_start:integrate_stop],
             axis=2,
         )
-        return {
-            "integrated_iq": np.mean(iq_shots, axis=0),
-            "shot_iq": iq_shots.copy(),
-            "axes": {
+        marker_waveforms = getattr(compiled, "marker_waveforms", None)
+        marker_windows_s = None
+        if marker_waveforms is not None:
+            marker_windows_s = np.zeros(
+                (compiled.number_of_sequence_steps, 2),
+                dtype=np.float64,
+            )
+            for step_index, marker in enumerate(marker_waveforms):
+                active = np.flatnonzero(marker)
+                if active.size:
+                    marker_windows_s[step_index] = (
+                        active[0] / compiled.sample_rate_hz,
+                        (active[-1] + 1) / compiled.sample_rate_hz,
+                    )
+        return ExperimentResult(
+            axes={
                 name: values.copy()
                 for name, values in compiled.axes.items()
             },
-            "point_coordinates": tuple(compiled.point_coordinates),
-        }
-
-    def acquire_compiled_decimate(
-        self,
-        compiled: "CompiledExperiment",
-        n_average: int,
-        *,
-        filter_type: str = "boxcar",
-    ) -> AcquisitionResult:
-        """Configure and acquire compiled raw/downconverted traces as a dict."""
-        integrate_time_s = (
-            compiled.readout.length_s
-            if compiled.readout.integrate_time_s is None
-            else compiled.readout.integrate_time_s
-        )
-        self.configure_experiment(
-            tone_frequency_hz=compiled.readout.demod_frequency_hz,
-            trigger_delay_s=compiled.trigger_delay_s,
-            integrate_time_s=integrate_time_s,
-            adc_channel=compiled.readout.adc_channel,
-        )
-        if self._uploaded_compiled is not compiled:
-            self.upload_compiled_experiment(compiled)
-
-        return self._acquire_sequence_decimated(
-            number_of_steps=compiled.number_of_sequence_steps,
-            number_of_averages=n_average,
-            filter_type=filter_type,
+            point_coordinates=compiled.point_coordinates,
+            raw=raw.copy(),
+            iq_traces=iq_traces.copy(),
+            iq_shots=iq_shots,
+            raw_time_s=raw_time_s,
+            iq_time_s=iq_time_s,
+            readout_name=compiled.readout.name,
+            initial_trigger_delay_s=compiled.trigger_delay_s,
+            readout_windows_s=(
+                None
+                if not hasattr(compiled, "readout_windows_s")
+                else compiled.readout_windows_s.copy()
+            ),
+            marker_windows_s=marker_windows_s,
+            acquire_window_s=self.acquire_window_ns * 1e-9,
             remove_dc_offset=getattr(
                 compiled,
                 "remove_dc_offset",
@@ -634,12 +635,31 @@ class AWGAlazar:
         self.last_records_volts = records
         return records
 
+    def acquire_records(
+        self,
+        n_average: int,
+    ) -> tuple[
+        npt.NDArray[np.float64],
+        npt.NDArray[np.float64],
+    ]:
+        """Acquire unprocessed voltage records for custom DSP pipelines."""
+        records = self._capture_records(n_average=n_average)
+        time_s = (
+            np.arange(records.shape[1], dtype=np.float64)
+            / self.alazar_sample_rate_hz
+        )
+        self.last_time_s = time_s
+        return time_s, records.copy()
+
     def acquire_decimate(
         self,
         n_average: int,
         filter_type: str = "boxcar",
-    ) -> AcquisitionResult:
-        """Acquire raw ADC records and time-resolved downconverted IQ traces."""
+    ) -> tuple[
+        npt.NDArray[np.float64],
+        npt.NDArray[np.complex128],
+    ]:
+        """Acquire and return a shot-averaged, time-resolved IQ waveform."""
         records = self._capture_records(n_average=n_average)
         baseband, shot_iq, average_iq = self.processor.process_decimate(
             records_volts=records,
@@ -652,27 +672,20 @@ class AWGAlazar:
             np.arange(average_iq.size, dtype=np.float64)
             / self.alazar_sample_rate_hz
         )
-        raw_time_s = (
-            np.arange(records.shape[1], dtype=np.float64)
-            / self.alazar_sample_rate_hz
-        )
 
         self.last_downconverted_iq = baseband
         self.last_shot_iq = shot_iq
         self.last_time_s = time_s
-        return {
-            "raw_time_s": raw_time_s,
-            "raw_traces": records.copy(),
-            "downconverted_time_s": time_s,
-            "downconverted_traces": shot_iq.copy(),
-            "downconverted_average": average_iq.copy(),
-        }
+        return time_s, average_iq
 
     def acquire(
         self,
         n_average: int,
-    ) -> AcquisitionResult:
-        """Acquire and return one integrated IQ point from the readout window."""
+    ) -> tuple[
+        np.complex128,
+        npt.NDArray[np.complex128],
+    ]:
+        """Return one averaged IQ point and every downconverted shot trace."""
         records = self._capture_records(n_average=n_average)
         integrate_start, integrate_stop = self.integrate_window_cycles
         baseband, shot_iq, average_iq = self.processor.process_integrate(
@@ -689,19 +702,21 @@ class AWGAlazar:
             np.arange(baseband.shape[1], dtype=np.float64)
             / self.alazar_sample_rate_hz
         )
-        return {
-            "integrated_iq": average_iq,
-            "shot_iq": shot_iq.copy(),
-        }
+        return average_iq, baseband
 
-    def _acquire_sequence_decimated(
+    def acquire_sequence_traces(
         self,
         number_of_steps: int,
         number_of_averages: int,
         filter_type: str = "boxcar",
         remove_dc_offset: bool = False,
-    ) -> AcquisitionResult:
-        """Acquire an interleaved sequence and keep raw/downconverted traces."""
+    ) -> tuple[
+        npt.NDArray[np.float64],
+        npt.NDArray[np.float64],
+        npt.NDArray[np.float64],
+        npt.NDArray[np.complex128],
+    ]:
+        """Acquire an interleaved sequence and average matching traces."""
         steps = int(number_of_steps)
         averages = int(number_of_averages)
         if steps < 1 or averages < 1:
@@ -748,14 +763,7 @@ class AWGAlazar:
         self.last_time_s = iq_time_s
         self.last_sequence_records_volts = sequence_records
         self.last_sequence_shot_iq = sequence_shot_iq
-        return {
-            "raw_time_s": raw_time_s,
-            "raw_traces": sequence_records.copy(),
-            "raw_average": average_records,
-            "downconverted_time_s": iq_time_s,
-            "downconverted_traces": sequence_shot_iq.copy(),
-            "downconverted_average": average_iq,
-        }
+        return raw_time_s, average_records, iq_time_s, average_iq
 
     def capture_diagnostics(self) -> dict[str, float | int | str]:
         """Summarize the most recent raw acquisition without modifying it."""

@@ -419,7 +419,7 @@ def waveform_binary(
     markers: Sequence[npt.ArrayLike] = (),
 ) -> bytes:
     waveform = validate_waveform(waveform_volts, amplitude_vpp)
-    normalized = (waveform / (amplitude_vpp / 2)).astype("<f4")
+    normalized = (2.0 * waveform / amplitude_vpp).astype("<f4")
     marker_bytes = (
         pack_markers(markers, waveform.size).tobytes() if markers else b""
     )

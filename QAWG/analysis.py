@@ -23,133 +23,6 @@ class WindowAnalysis:
     axes: tuple[Any, Any]
 
 
-@dataclass(frozen=True)
-class PhaseShotDiagnostics:
-    phases_radians: np.ndarray
-    points: np.ndarray
-    centers: np.ndarray
-    center_angles_degrees: np.ndarray
-    radius_mean: np.ndarray
-    radius_std: np.ndarray
-    shot_angle_std_degrees: np.ndarray
-    opposite_error_percent: float | None
-    common_phase_jitter_degrees: float | None
-    equivalent_timing_jitter_s: float | None
-
-
-def _circular_std_degrees(angles: np.ndarray) -> float:
-    resultant = np.abs(np.mean(np.exp(1j * angles)))
-    resultant = float(np.clip(resultant, 1e-15, 1.0))
-    return float(np.rad2deg(np.sqrt(-2.0 * np.log(resultant))))
-
-
-def diagnose_phase_shots(
-    result: ExperimentResult,
-    *,
-    axis_name: str = "phase",
-    integration_start_s: float = 0.0,
-    integration_stop_s: float | None = None,
-    tone_frequency_hz: float | None = None,
-    report: bool = True,
-) -> PhaseShotDiagnostics:
-    """Quantify phase stability for interleaved phase-reference shots.
-
-    The calculation uses result.iq_traces, so the same digital downconversion
-    and boxcar filtering used by acquisition are preserved. For a two-step
-    0/pi experiment, ``opposite_error_percent`` should be small when the two
-    states are true opposites, while ``common_phase_jitter_degrees`` reveals
-    shot-to-shot phase wander shared by the pair.
-    """
-    if result.iq_traces.ndim != 3:
-        raise ValueError("result.iq_traces must have shape (shot, step, time)")
-    phases = result.axis(axis_name).astype(float)
-    if phases.size != result.iq_traces.shape[1]:
-        raise ValueError("phase axis length does not match sequence steps")
-    if integration_start_s < 0:
-        raise ValueError("integration_start_s cannot be negative")
-    stop_s = (
-        float(result.iq_time_s[-1])
-        if integration_stop_s is None
-        else float(integration_stop_s)
-    )
-    if stop_s <= integration_start_s:
-        raise ValueError("integration stop must be after integration start")
-    indices = np.flatnonzero(
-        (result.iq_time_s >= integration_start_s)
-        & (result.iq_time_s < stop_s)
-    )
-    if not indices.size:
-        raise ValueError("integration window contains no IQ samples")
-
-    points = np.mean(result.iq_traces[:, :, indices], axis=2)
-    centers = np.mean(points, axis=0)
-    center_angles = np.rad2deg(np.angle(centers))
-    radii = np.abs(points)
-    shot_angles = np.angle(points)
-    shot_angle_std = np.array(
-        [_circular_std_degrees(shot_angles[:, step]) for step in range(phases.size)]
-    )
-
-    opposite_error = None
-    common_phase_jitter = None
-    equivalent_timing_jitter_s = None
-    if phases.size == 2:
-        pair_sum = points[:, 0] + points[:, 1]
-        pair_diff = points[:, 0] - points[:, 1]
-        denominator = float(np.mean(np.abs(pair_diff)))
-        if denominator > 0:
-            opposite_error = float(
-                100.0 * np.mean(np.abs(pair_sum)) / denominator
-            )
-        nonzero = np.abs(pair_diff) > 0
-        if np.any(nonzero):
-            common_phase_jitter = _circular_std_degrees(
-                np.angle(pair_diff[nonzero])
-            )
-            if tone_frequency_hz is not None and tone_frequency_hz > 0:
-                equivalent_timing_jitter_s = (
-                    np.deg2rad(common_phase_jitter)
-                    / (2.0 * np.pi * float(tone_frequency_hz))
-                )
-
-    diagnostics = PhaseShotDiagnostics(
-        phases_radians=phases,
-        points=points,
-        centers=centers,
-        center_angles_degrees=center_angles,
-        radius_mean=np.mean(radii, axis=0),
-        radius_std=np.std(radii, axis=0),
-        shot_angle_std_degrees=shot_angle_std,
-        opposite_error_percent=opposite_error,
-        common_phase_jitter_degrees=common_phase_jitter,
-        equivalent_timing_jitter_s=equivalent_timing_jitter_s,
-    )
-
-    if report:
-        for step, phase in enumerate(phases):
-            print(
-                f"phase {np.rad2deg(phase):8.3f} deg: "
-                f"center angle {center_angles[step]:8.3f} deg, "
-                f"radius {diagnostics.radius_mean[step] * 1e3:8.4f} mV, "
-                f"shot angle std {shot_angle_std[step]:8.3f} deg"
-            )
-        if opposite_error is not None:
-            print(f"0/pi opposite error: {opposite_error:.3f}%")
-        if common_phase_jitter is not None:
-            print(
-                "0/pi common phase jitter: "
-                f"{common_phase_jitter:.3f} deg"
-            )
-        if equivalent_timing_jitter_s is not None:
-            print(
-                "Equivalent timing jitter at "
-                f"{tone_frequency_hz / 1e6:.6g} MHz: "
-                f"{equivalent_timing_jitter_s * 1e12:.3f} ps"
-            )
-
-    return diagnostics
-
-
 def _interpolate_crossing(
     time_s: np.ndarray,
     values: np.ndarray,
@@ -191,8 +64,7 @@ def _lowpass_iq_envelope(
     if window_samples % 2 == 0:
         window_samples += 1
     window_samples = min(window_samples, iq_trace.size)
-    smoothed = _centered_moving_average(iq_trace, window_samples)
-    return np.abs(smoothed)
+    return np.abs(_centered_moving_average(iq_trace, window_samples))
 
 
 def _find_sustained_rise(
@@ -384,7 +256,7 @@ def calculate_window(
         )
         axes[1].set_xlabel("Time after suggested ATS trigger (ns)")
         axes[1].set_ylabel("|IQ| (mV)")
-        axes[1].set_title("Low-pass demodulated readout envelope")
+        axes[1].set_title("Demodulated readout envelope")
         for axis in axes:
             axis.grid(True, alpha=0.3)
             axis.legend()
