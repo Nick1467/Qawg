@@ -26,7 +26,6 @@ if labber_script_path not in sys.path:
 
 try:
     import Labber
-
     print(Labber.version)
     HAS_LABBER = True
 except ImportError:
@@ -365,8 +364,9 @@ def main():
             )
 
             chan_names_dtype = [("name", vlen_str), ("info", vlen_str)]
+            chan_names = np.array([(name, "") for name in sweep_names], dtype=chan_names_dtype)
             data_grp.create_dataset(
-                "Channel names", shape=(len(sweep_shapes),), dtype=chan_names_dtype
+                "Channel names", data=chan_names, dtype=chan_names_dtype
             )
 
             data_shape = tuple(sweep_shapes) + (len(sweep_shapes), 1)
@@ -529,24 +529,38 @@ def main():
             dig_grp.attrs[str(k)] = clean_attr_value(v)
 
         if not HAS_LABBER:
-            # In mock mode, also write the trace data arrays for verification
-            # 9. Update _t0dt values of traces under Traces group
+            # In mock mode, populate the datasets under /Traces group with actual values
+            traces_grp = f["Traces"]
             if has_iq_traces:
-                dig_grp.create_dataset(
-                    f"{readout_name} - Demodulated Trace",
-                    data=iq_traces_padded,
-                    dtype=np.float64,
-                )
+                real_part = np.real(iq_traces_padded)
+                imag_part = np.imag(iq_traces_padded)
+                stacked = np.stack((real_part, imag_part), axis=-2)
+                # Transpose from (*sweep_shapes, 2, max_L) to (max_L, 2, *sweep_shapes)
+                d = stacked.ndim - 2
+                axes_order = [d + 1, d] + list(range(d))
+                packed = np.transpose(stacked, axes_order)
+                traces_grp[f"{readout_name} - Demodulated Trace"][:] = packed
+
             if has_raw:
-                dig_grp.create_dataset(
-                    f"{readout_name} - Raw Trace", data=raw_padded, dtype=np.float64
-                )
+                # Transpose from (*sweep_shapes, max_L) to (max_L, *sweep_shapes)
+                d = raw_padded.ndim - 1
+                axes_order = [d] + list(range(d))
+                packed = np.transpose(raw_padded, axes_order)
+                traces_grp[f"{readout_name} - Raw Trace"][:] = packed
+
             if has_iq_shots:
-                dig_grp.create_dataset(
-                    f"{readout_name} - Integrated IQ",
-                    data=iq_shots_padded,
-                    dtype=np.float64,
-                )
+                real_part = np.real(iq_shots_padded)
+                imag_part = np.imag(iq_shots_padded)
+                stacked = np.stack((real_part, imag_part), axis=-2)
+                # Slice the first element along max_L dimension to get (*sweep_shapes, 2)
+                stacked_slice = stacked[..., :, 0]
+                # Transpose to (2, *sweep_shapes)
+                d = stacked_slice.ndim - 1
+                axes_order = [d] + list(range(d))
+                packed_slice = np.transpose(stacked_slice, axes_order)
+                # Expand first dimension to get (1, 2, *sweep_shapes)
+                packed = np.expand_dims(packed_slice, axis=0)
+                traces_grp[f"{readout_name} - Integrated IQ"][:] = packed
 
     print("HDF5 Log conversion completed successfully.")
 

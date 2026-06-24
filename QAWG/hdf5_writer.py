@@ -21,6 +21,7 @@ def write_result_to_hdf5(
     user: str = "",
     average_mode: bool = True,
     cfg: dict[str, Any] | None = None,
+    rename_sweeps: dict[str, str] | None = None,
 ) -> None:
     """Serialize the ExperimentResult to .npz and invoke labber_converter.py.
 
@@ -41,13 +42,21 @@ def write_result_to_hdf5(
         If False, treats repetitions as the first sweep dimension.
     cfg : dict, optional
         The experiment configuration settings to record in HDF5 config metadata.
+    rename_sweeps : dict, optional
+        A dictionary mapping original sweep axis names to new names.
     """
     # 1. Determine repetitions and steps
     n_average = 1
-    if hasattr(result, "iq_shots") and result.iq_shots is not None:
+    if hasattr(result, "iq_shots") and result.iq_shots is not None and result.iq_shots.size > 0:
         n_average = result.iq_shots.shape[0]
+    elif hasattr(result, "iq_traces") and result.iq_traces is not None and result.iq_traces.size > 0:
+        n_average = result.iq_traces.shape[0]
+    elif hasattr(result, "raw") and result.raw is not None and result.raw.size > 0:
+        n_average = result.raw.shape[0]
 
     orig_sweep_names = list(result.axes.keys())
+    if rename_sweeps:
+        orig_sweep_names = [rename_sweeps.get(name, name) for name in orig_sweep_names]
     orig_sweep_values = [np.asarray(val) for val in result.axes.values()]
     orig_sweep_shapes = [len(val) for val in orig_sweep_values]
 
@@ -88,6 +97,7 @@ def write_result_to_hdf5(
         hasattr(result, "iq_shots")
         and result.iq_shots is not None
         and result.iq_shots.size > 0
+        and not np.all(np.isnan(result.iq_shots))
     )
 
     if has_iq_traces:
